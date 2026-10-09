@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hap_atlantic"
+version = "0.1.0"
+description = "Capacity and latency of an optical airliner backbone between Frankfurt and New York"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "pyarrow",
+    "networkx",
+    "matplotlib",
+    "requests",
+]
+
+[project.optional-dependencies]
+trino = ["pyopensky"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+hap-atlantic = "hap_atlantic.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "NPY"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
