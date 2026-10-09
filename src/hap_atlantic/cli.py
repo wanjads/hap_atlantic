@@ -56,6 +56,10 @@ def main(argv=None) -> None:
     sim.add_argument("--workers", type=int, default=1)
     sim.add_argument("--out", default=None)
 
+    w = sub.add_parser("weather", help="download and cache the ERA5 grid (Open-Meteo)")
+    w.add_argument("--start", required=True, help="YYYY-MM-DD")
+    w.add_argument("--end", required=True, help="YYYY-MM-DD (inclusive)")
+
     sub.add_parser("bounds", help="print latency benchmarks Frankfurt - New York")
 
     args = ap.parse_args(argv)
@@ -120,6 +124,17 @@ def main(argv=None) -> None:
         print((res[cols] / 1e9).describe().round(1).to_string())
         print(f"connected {res['connected'].mean():.1%}, median min delay "
               f"{res.loc[res['connected'], 'min_delay'].median() * 1e3:.2f} ms")
+    elif args.cmd == "weather":
+        import numpy as np
+
+        from .config import NORTH_ATLANTIC_BBOX as B
+        from .config import CloudParams
+        from .weather import fetch_grid
+
+        step = CloudParams().grid_step
+        hours, _ = fetch_grid(np.arange(B[0], B[1] + 1e-9, step),
+                              np.arange(B[2], B[3] + 1e-9, step), args.start, args.end)
+        print(f"{len(hours)} hours cached in data/weather")
     elif args.cmd == "bounds":
         from .reference import benchmarks
 

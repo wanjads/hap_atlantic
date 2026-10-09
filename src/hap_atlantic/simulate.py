@@ -83,7 +83,8 @@ def _ground_links(G, endpoint) -> int:
     return sum(1 for gs in G.neighbors(endpoint) for v in G.neighbors(gs) if v != endpoint)
 
 
-def evaluate_snapshot(G: nx.Graph, p: Params, configs, metrics=METRICS) -> dict:
+def evaluate_snapshot(G: nx.Graph, p: Params, configs, metrics=METRICS,
+                      milp_time: float = 60.0) -> dict:
     n_air = sum(1 for _, k in G.nodes(data="kind") if k == "aircraft")
     delay, path = flow.min_latency_path(G)
     m = {
@@ -106,7 +107,7 @@ def evaluate_snapshot(G: nx.Graph, p: Params, configs, metrics=METRICS) -> dict:
         graphs = {"ocean": lambda H=H, c=c: ocean_graph(H, c.r_max),
                   "backbone": lambda H=H: _backbone(H), "e2e": lambda H=H: H}
         for name in metrics:
-            r = flow.capacity(graphs[name](), c.r_max)
+            r = flow.capacity(graphs[name](), c.r_max, time_limit=milp_time)
             m[f"{name}_{c.label}"] = r["value"]
             m[f"{name}_{c.label}_heur"] = r["heuristic"]
             m[f"{name}_{c.label}_bound"] = r["bound"]
@@ -114,19 +115,23 @@ def evaluate_snapshot(G: nx.Graph, p: Params, configs, metrics=METRICS) -> dict:
 
 
 def _chunk(args):
-    snaps, p, configs, metrics, t_range = args
+    snaps, p, configs, metrics, t_range, milp_time = args
     clouds = (CloudField(*t_range, p.clouds, p.seed, p.geometry.earth_radius)
               if p.clouds.model == "era5" else None)
     rows = []
     for t, snap in snaps:
         G = build_graph(snap, p, clouds.at(t) if clouds is not None else None)
-        rows.append({"time": t, **evaluate_snapshot(G, p, configs, metrics)})
+        rows.append({"time": t, **evaluate_snapshot(G, p, configs, metrics, milp_time)})
     return rows
 
 
 def run(states: pd.DataFrame, p: Params, configs, t0: float, t1: float, every: int = 10,
-        metrics=METRICS, workers: int = 1) -> pd.DataFrame:
-    """Evaluate every `every`-th grid time step in [t0, t1)."""
+        metrics=METRICS, workers: int = 1, milp_time: float = 60.0) -> pd.DataFrame:
+    """Evaluate every `every`-th grid time step in [t0, t1).
+
+    milp_time: time limit per MILP; if it is hit, the value is the best solution found and
+    the `_bound` column holds the upper bound.
+    """
     states = select_fleet(states, p.airliners_only, p.equipage, p.seed)
     times = np.sort(states["time"].unique())
     times = times[(times >= t0) & (times < t1)][::every]
@@ -134,7 +139,7 @@ def run(states: pd.DataFrame, p: Params, configs, t0: float, t1: float, every: i
     snaps = [(t, by_t.get(t, states.iloc[:0])) for t in times]
     t_range = (t0 - 3600.0, t1 + 3600.0)  # weather window (whole days are fetched)
     n = max(1, min(workers, len(snaps)))
-    chunks = [(snaps[i::n], p, configs, metrics, t_range) for i in range(n)]
+    chunks = [(snaps[i::n], p, configs, metrics, t_range, milp_time) for i in range(n)]
     if n == 1:
         rows = _chunk(chunks[0])
     else:

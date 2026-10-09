@@ -87,7 +87,7 @@ def exp_weather(days):
                         clouds=replace(p0.clouds, model="era5", f_cirrus=f_ci),
                         ground=replace(p0.ground, n_sites=sites, rf_rate=rf))
             tic = time.time()
-            r = run(states, p, configs, t0, t1, workers=WORKERS)
+            r = run(states, p, configs, t0, t1, workers=WORKERS, milp_time=10.0)
             rows.append(r.assign(f_cirrus=f_ci, sites=sites, rf_gbps=rf / 1e9, seed=seed))
             print(f"  {d} f_ci {f_ci} sites {sites} rf {rf / 1e9:g} seed {seed} "
                   f"({time.time() - tic:.0f} s)", flush=True)
