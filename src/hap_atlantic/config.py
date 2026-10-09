@@ -56,7 +56,8 @@ class GeometryParams:
     h_chord_min: float = 7_000.0  # min. height of an air-to-air ray above ground [m]
     d_max_air: float = 700e3  # max. air-to-air link range (terminal acquisition limit) [m]
     h_node_min: float = 1_000.0  # aircraft below this altitude are ignored [m]
-    elev_min_ground: float = 10.0  # min. elevation of ground-to-air links [deg]
+    elev_min_ground: float = 5.0  # min. elevation of ground-to-air links [deg] (obstacles,
+    # ground turbulence; the link budget alone would allow ~2 deg)
     corridor_half_width: float = 1000e3  # aircraft farther from the FRA-NY arc are ignored [m]
     yao_cones: int = 8  # keep nearest + farthest neighbour per cone (0 = keep all links)
     ray_samples: int = 16  # points per ray for extinction / turbulence integrals
