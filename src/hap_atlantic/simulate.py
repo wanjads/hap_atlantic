@@ -11,6 +11,7 @@ scale, terminals per aircraft K) with `topology.with_tech`. Three capacities are
 
 from __future__ import annotations
 
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,10 +154,11 @@ def run(states: pd.DataFrame, p: Params, configs, t0: float, t1: float, every: i
     milp_time: time limit per MILP; if it is hit, the value is the best solution found and
     the `_bound` column holds the upper bound.
     """
-    states = select_fleet(states, p.airliners_only, p.equipage, p.seed)
     times = np.sort(states["time"].unique())
     times = times[(times >= t0) & (times < t1)][::every]
-    by_t = {t: g for t, g in states[states["time"].isin(times)].groupby("time")}
+    states = states[states["time"].isin(times)]  # only the evaluated snapshots
+    states = select_fleet(states, p.airliners_only, p.equipage, p.seed)
+    by_t = {t: g for t, g in states.groupby("time")}
     snaps = [(t, by_t.get(t, states.iloc[:0])) for t in times]
     t_range = (t0 - 3600.0, t1 + 3600.0)  # weather window (whole days are fetched)
     n = max(1, min(safe_workers(workers, p.clouds.model == "era5"), len(snaps)))
@@ -164,6 +166,8 @@ def run(states: pd.DataFrame, p: Params, configs, t0: float, t1: float, every: i
     if n == 1:
         rows = _chunk(chunks[0])
     else:
-        with ProcessPoolExecutor(n) as ex:
+        # spawn: fresh workers that neither inherit (and copy) the memory of the caller nor
+        # its thread state (fork after pyarrow threads can deadlock)
+        with ProcessPoolExecutor(n, mp_context=mp.get_context("spawn")) as ex:
             rows = [r for part in ex.map(_chunk, chunks) for r in part]
     return pd.DataFrame(rows).sort_values("time", ignore_index=True)

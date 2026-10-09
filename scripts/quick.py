@@ -1,7 +1,7 @@
-"""Small sanity-check experiments (a few minutes each) with figures in figures/quick/.
+"""Mini sanity-check experiments (seconds each) with figures in figures/quick/.
 
-9 July 2023 only, one snapshot every 30 min, 100 Gbit/s links, K = 2, one ground station
-per endpoint, minimum elevation 5 deg, minimum air-to-air ray height 3 km.
+9 July 2023, only 4 snapshots (04, 09, 14, 19 UTC), 100 Gbit/s links, K = 2, one ground
+station per endpoint, minimum elevation 5 deg, minimum air-to-air ray height 3 km.
 
     python scripts/quick.py hmin      # min. ray height 2/3/5/7 km, clear sky vs. ERA5 clouds
     python scripts/quick.py clouds    # ERA5 clouds: seeds, RF fallback, ice crystal size
@@ -28,11 +28,11 @@ from hap_atlantic.simulate import run, tech_config
 from hap_atlantic.traffic import select_fleet
 
 STATES = "data/processed/20230708-10.parquet"
-T0 = pd.Timestamp("2023-07-09", tz="UTC").timestamp()
-T1 = T0 + 86400.0
-EVERY = 30  # minutes
+DAY = pd.Timestamp("2023-07-09", tz="UTC").timestamp()
+T0, T1 = DAY + 4 * 3600.0, DAY + 86400.0
+EVERY = 300  # minutes -> 04, 09, 14, 19 UTC
 OUT, FIG = Path("results/quick"), Path("figures/quick")
-WORKERS = 15
+WORKERS = 4
 ERA5 = {"model": "era5"}
 
 plt.rcParams.update({"font.size": 8, "axes.grid": True, "grid.alpha": 0.3,
@@ -50,14 +50,26 @@ def _p(h_min=3e3, clouds=False, **kw):
 def _run(p, label, configs=None, metrics=("ocean", "e2e"), milp_time=10.0):
     tic = time.time()
     configs = configs or [tech_config("leo", 2, p)]
-    r = run(pd.read_parquet(STATES), p, configs, T0, T1, every=EVERY, metrics=metrics,
+    r = run(_states(), p, configs, T0, T1, every=1, metrics=metrics,
             workers=WORKERS, milp_time=milp_time)
-    r["hour"] = (r["time"] - T0) / 3600.0
+    r["hour"] = (r["time"] - DAY) / 3600.0
     c = configs[0].label
     print(f"  {label}: {time.time() - tic:.0f} s, ocean {(r[f'ocean_{c}'] > 0).mean():.0%}, "
           f"e2e {(r[f'e2e_{c}'] > 0).mean():.0%}, mean e2e {r[f'e2e_{c}'].mean() / 1e9:.0f} "
           f"Gbit/s", flush=True)
     return r.assign(variant=label)
+
+
+_CACHE = {}
+
+
+def _states():
+    """The 4 snapshots only (read once)."""
+    if "s" not in _CACHE:
+        st = pd.read_parquet(STATES, filters=[("time", ">=", T0), ("time", "<", T1)])
+        times = np.sort(st["time"].unique())[::EVERY]
+        _CACHE["s"] = st[st["time"].isin(times)]
+    return _CACHE["s"]
 
 
 def _save(fig, name):
@@ -79,7 +91,7 @@ def _bars(ax, rows, col, fn, ylabel):
 def hmin():
     rows = []
     for clouds in (False, True):
-        for h in (2e3, 3e3, 5e3, 7e3):
+        for h in (3e3, 7e3):
             rows.append(_run(_p(h, clouds), f"{h / 1e3:g} km, {'ERA5' if clouds else 'clear'}"))
     pd.concat(rows).to_csv(_out("hmin"), index=False)
     fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
@@ -94,44 +106,37 @@ def hmin():
 
 
 def clouds():
-    rows = [_run(_p(), "clear sky")]
-    for seed in (0, 1, 2):
-        rows.append(_run(_p(clouds=True, seed=seed), f"ERA5 seed {seed}"))
+    rows = [_run(_p(), "clear sky"), _run(_p(clouds=True), "ERA5")]
     p = _p(clouds=True)
     rows.append(_run(replace(p, ground=replace(p.ground, rf_rate=10e9)), "ERA5 + RF 10 Gbit/s"))
-    for de in (25e-6, 100e-6):
-        rows.append(_run(replace(p, clouds=replace(p.clouds, de_ice=de)),
-                         f"ERA5, ice D_e={de * 1e6:g} um"))
+    rows.append(_run(replace(p, clouds=replace(p.clouds, de_ice=25e-6)), "ERA5, ice D_e=25 um"))
     pd.concat(rows).to_csv(_out("clouds"), index=False)
     fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
     _bars(axes[0], rows, "leo_k2", lambda s: (s > 0).mean(), "share of the day connected")
     _bars(axes[1], rows, "leo_k2", lambda s: s.mean() / 1e9, "mean capacity [Gbit/s]")
     ref = benchmarks()
-    for r in rows[:5]:
-        d = np.sort(r.loc[r["connected"], "min_delay"] * 1e3)
-        axes[2].step(d, np.arange(1, len(d) + 1) / len(r), where="post",
-                     label=r["variant"].iloc[0])
-    for lab, v in (("vacuum", "vacuum"), ("HF", "hf_scaled"), ("fibre+MW",
-                                                                "fibre_microwave_published")):
-        axes[2].axvline(ref[v] * 1e3, color="k", lw=0.6, ls=":")
-        axes[2].text(ref[v] * 1e3 + 0.1, 0.02, lab, fontsize=6, rotation=90)
-    axes[2].set_xlabel("one-way latency [ms]")
-    axes[2].set_ylabel("share of the day with latency ≤ x")
-    axes[2].set_xlim(20.5, 32.5)
+    for i, r in enumerate(rows):
+        axes[2].plot(r["hour"] + 0.25 * i, r["min_delay"] * 1e3, "o", label=r["variant"].iloc[0])
+    for lab, v in (("vacuum", "vacuum"), ("fibre+MW", "fibre_microwave_published")):
+        axes[2].axhline(ref[v] * 1e3, color="k", lw=0.6, ls=":")
+        axes[2].text(3.5, ref[v] * 1e3 + 0.1, lab, fontsize=6)
+    axes[2].set_xlabel("time [h UTC] (missing dot = no path)")
+    axes[2].set_ylabel("min. one-way latency [ms]")
+    axes[2].set_ylim(20, 33)
     axes[2].legend(fontsize=5)
     _save(fig, "q2_clouds")
 
 
 def tech():
     p = _p(clouds=True)
-    configs = [tech_config(t, k, p) for t in ("leo", "dwdm", "visionary") for k in (2, 4, 6)]
+    configs = [tech_config(t, k, p) for t in ("leo", "dwdm") for k in (2, 4)]
     r = _run(p, "ERA5 seed 0", configs=configs)
     r.to_csv(_out("tech"), index=False)
     fig, axes = plt.subplots(1, 2, figsize=(9, 2.8), sharey=True)
     for ax, m in zip(axes, ("ocean", "e2e"), strict=True):
-        for k, col in ((2, "#1b9e77"), (4, "#d95f02"), (6, "#7570b3")):
-            rates = [TECHS[t].r_max for t in ("leo", "dwdm", "visionary")]
-            caps = [r[f"{m}_{t}_k{k}"].mean() for t in ("leo", "dwdm", "visionary")]
+        for k, col in ((2, "#1b9e77"), (4, "#d95f02")):
+            rates = [TECHS[t].r_max for t in ("leo", "dwdm")]
+            caps = [r[f"{m}_{t}_k{k}"].mean() for t in ("leo", "dwdm")]
             chains = r[f"{m}_leo_k{k}"].mean() / TECHS["leo"].r_max
             ax.loglog([TECHS["demo"].r_max, 1e11], [chains * TECHS["demo"].r_max, chains * 1e11],
                       color=col, ls="--")
