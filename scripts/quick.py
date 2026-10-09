@@ -3,8 +3,8 @@
 9 July 2023, only 4 snapshots (04, 09, 14, 19 UTC), 100 Gbit/s links, K = 2, one ground
 station per endpoint, minimum elevation 5 deg, minimum air-to-air ray height 3 km.
 
-    python scripts/quick.py hmin      # min. ray height 2/3/5/7 km, clear sky vs. ERA5 clouds
-    python scripts/quick.py clouds    # ERA5 clouds: seeds, RF fallback, ice crystal size
+    python scripts/quick.py hmin      # clear sky vs. ERA5 clouds (+ RF fallback)
+    python scripts/quick.py clouds    # ERA5 clouds: RF fallback on/off, ice crystal size
     python scripts/quick.py tech      # ERA5 clouds: rate per link x terminals per aircraft
     python scripts/quick.py newyork   # map: airliners around New York, elevation rings
     python scripts/quick.py map       # map of one snapshot with cloud-blocked links
@@ -89,27 +89,22 @@ def _bars(ax, rows, col, fn, ylabel):
 
 
 def hmin():
-    rows = []
-    for clouds in (False, True):
-        for h in (3e3, 7e3):
-            rows.append(_run(_p(h, clouds), f"{h / 1e3:g} km, {'ERA5' if clouds else 'clear'}"))
+    """Clear sky vs. ERA5 clouds (with RF fallback of the ground links), h_min = 3 km."""
+    rows = [_run(_p(), "clear sky"), _run(_p(clouds=True), "ERA5 clouds + RF")]
     pd.concat(rows).to_csv(_out("hmin"), index=False)
-    fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
-    _bars(axes[0], rows, "leo_k2", lambda s: (s > 0).mean(), "share of the day connected")
+    fig, axes = plt.subplots(1, 2, figsize=(7.5, 2.8))
+    _bars(axes[0], rows, "leo_k2", lambda s: (s > 0).mean(), "share of snapshots connected")
     _bars(axes[1], rows, "leo_k2", lambda s: s.mean() / 1e9, "mean capacity [Gbit/s]")
-    axes[2].bar(range(len(rows)), [r["n_air_links"].mean() for r in rows])
-    axes[2].set_xticks(range(len(rows)), [r["variant"].iloc[0] for r in rows], rotation=35,
-                       ha="right", fontsize=6)
-    axes[2].set_ylabel("usable air-to-air links (after Yao)")
-    fig.suptitle("min. height of air-to-air rays; 100 Gbit/s links, K=2", fontsize=8)
+    fig.suptitle("100 Gbit/s links, K=2, min. ray height 3 km, 4 snapshots", fontsize=8)
     _save(fig, "q1_hmin")
 
 
 def clouds():
-    rows = [_run(_p(), "clear sky"), _run(_p(clouds=True), "ERA5")]
     p = _p(clouds=True)
-    rows.append(_run(replace(p, ground=replace(p.ground, rf_rate=10e9)), "ERA5 + RF 10 Gbit/s"))
-    rows.append(_run(replace(p, clouds=replace(p.clouds, de_ice=25e-6)), "ERA5, ice D_e=25 um"))
+    rows = [_run(_p(), "clear sky"),
+            _run(replace(p, ground=replace(p.ground, rf_rate=0.0)), "ERA5, optical only"),
+            _run(p, "ERA5 + RF 10 Gbit/s"),
+            _run(replace(p, clouds=replace(p.clouds, de_ice=25e-6)), "ERA5 + RF, ice D_e=25 um")]
     pd.concat(rows).to_csv(_out("clouds"), index=False)
     fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
     _bars(axes[0], rows, "leo_k2", lambda s: (s > 0).mean(), "share of the day connected")

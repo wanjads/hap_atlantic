@@ -72,7 +72,7 @@ class GroundParams:
     n_sites: int = 1  # number of ground stations per endpoint
     ring_radius: float = 50e3  # sites are placed on a ring of this radius [m]
     terminals_per_site: int = 4
-    rf_rate: float = 0.0  # RF fallback rate per ground link when cloudy, 0 = optical only [bit/s]
+    rf_rate: float = 10e9  # RF fallback rate per ground link when cloudy, 0 = optical only [bit/s]
     rf_rain_max: float = 5.0  # RF ground links fail above this rain rate [mm/h]
     fiber_detour: float = 1.3  # terrestrial fibre route length / great-circle distance [-]
 
