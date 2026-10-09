@@ -2,7 +2,7 @@
 
     python scripts/experiments.py tech      # clear sky, technology tiers x K
     python scripts/experiments.py equipage  # clear sky, share of equipped airliners
-    python scripts/experiments.py weather   # ERA5 clouds, f_cirrus x sites x RF x seeds
+    python scripts/experiments.py weather   # ERA5 clouds: sites x RF x seeds
     python scripts/experiments.py paths     # min-latency path every minute, stability
     python scripts/experiments.py solver    # heuristic vs MILP vs bounds, Yao vs full graph
 
@@ -25,7 +25,7 @@ import pandas as pd
 
 from hap_atlantic import flow
 from hap_atlantic.config import K_VALUES, scenario
-from hap_atlantic.simulate import ocean_graph, run, tech_config
+from hap_atlantic.simulate import ocean_graph, run, safe_workers, tech_config
 from hap_atlantic.topology import DST, SRC, build_graph, with_tech
 from hap_atlantic.traffic import select_fleet
 from hap_atlantic.weather import CloudField
@@ -81,15 +81,13 @@ def exp_weather(days):
     for d in days:
         states, t0, t1 = _day(d)
         rows = []
-        for f_ci, sites, rf, seed in itertools.product((0.0, 0.5, 1.0), (1, 5), (0.0, 10e9),
-                                                     SEEDS):
-            p = replace(p0, seed=seed,
-                        clouds=replace(p0.clouds, model="era5", f_cirrus=f_ci),
+        for sites, rf, seed in itertools.product((1, 5), (0.0, 10e9), SEEDS):
+            p = replace(p0, seed=seed, clouds=replace(p0.clouds, model="era5"),
                         ground=replace(p0.ground, n_sites=sites, rf_rate=rf))
             tic = time.time()
             r = run(states, p, configs, t0, t1, workers=WORKERS, milp_time=10.0)
-            rows.append(r.assign(f_cirrus=f_ci, sites=sites, rf_gbps=rf / 1e9, seed=seed))
-            print(f"  {d} f_ci {f_ci} sites {sites} rf {rf / 1e9:g} seed {seed} "
+            rows.append(r.assign(sites=sites, rf_gbps=rf / 1e9, seed=seed))
+            print(f"  {d} sites {sites} rf {rf / 1e9:g} seed {seed} "
                   f"({time.time() - tic:.0f} s)", flush=True)
         _save(pd.concat(rows).assign(day=d), f"weather_{d}")
 
@@ -152,7 +150,7 @@ def exp_paths(days):
         states = select_fleet(states, p.airliners_only, p.equipage, p.seed)
         states = states[(states.time >= t0) & (states.time < t1)]
         snaps = list(states.groupby("time"))
-        n = WORKERS  # contiguous blocks keep the sticky state
+        n = safe_workers(WORKERS, wx == "era5")  # contiguous blocks keep the sticky state
         blocks = np.array_split(np.arange(len(snaps)), n)
         chunks = [([snaps[i] for i in b], p, (t0 - 3600.0, t1 + 3600.0)) for b in blocks]
         with ProcessPoolExecutor(n) as ex:
@@ -193,7 +191,7 @@ def exp_solver(days):
         states = select_fleet(states, True, 1.0, 0)
         times = np.arange(t0, t1, 3600.0)
         jobs = [(states[states.time == t], t, k) for t in times for k in (2, 4)]
-        with ProcessPoolExecutor(WORKERS) as ex:
+        with ProcessPoolExecutor(safe_workers(WORKERS, False)) as ex:
             rows = [r for part in ex.map(_solver_one, jobs) for r in part]
         _save(pd.DataFrame(rows).assign(day=d), f"solver_{d}")
 

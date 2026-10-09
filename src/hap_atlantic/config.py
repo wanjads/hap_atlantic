@@ -47,13 +47,15 @@ class TerminalParams:
     r_max: float = 100e9  # transceiver line-rate limit per link [bit/s]
     outage_prob: float = 1e-3  # target outage probability for the turbulence fade margin
     hop_delay: float = 10e-6  # per-hop processing delay (coherent DSP + FEC + switch) [s]
+    r_min: float = 1e9  # links with a lower link-budget rate are not used [bit/s]
 
 
 @dataclass(frozen=True)
 class GeometryParams:
     earth_radius: float = 6_371_008.8  # mean Earth radius [m]
     k_refraction: float = 1.0  # effective Earth radius factor (1 = straight rays)
-    h_chord_min: float = 7_000.0  # min. height of an air-to-air ray above ground [m]
+    h_chord_min: float = 3_000.0  # min. height of an air-to-air ray above ground [m] (terrain,
+    # boundary layer; clouds are modelled explicitly along the ray)
     d_max_air: float = 700e3  # max. air-to-air link range (terminal acquisition limit) [m]
     h_node_min: float = 1_000.0  # aircraft below this altitude are ignored [m]
     elev_min_ground: float = 5.0  # min. elevation of ground-to-air links [deg] (obstacles,
@@ -77,23 +79,16 @@ class GroundParams:
 
 @dataclass(frozen=True)
 class CloudParams:
-    """Cloud blockage of optical links, driven by hourly ERA5 cloud cover (see weather.py).
-
-    A point in a cloud layer is cloudy if Phi(Z) < c, where c is the ERA5 cover of that
-    layer (high layer: f_cirrus * c) and Z a standard Gaussian space-time field with
-    correlation length l_corr and correlation time t_corr. Air-to-air rays (>= h_chord_min)
-    only cross the high layer; ground links cross all three layers.
-    """
+    """Cloud attenuation of optical links from 3D ERA5 cloud fields (see weather.py)."""
 
     model: str = "clear"  # "clear" (no clouds) or "era5"
-    f_cirrus: float = 0.5  # fraction of high (cirrus) cloud that blocks the beam [-]
-    l_corr: float = 50e3  # horizontal correlation length of the latent field [m]
-    t_corr: float = 3600.0  # correlation time of the latent field [s] (~ l_corr / wind)
-    layer_heights: tuple = (1_000.0, 4_000.0, 8_000.0)  # low / mid / high crossing height [m]
-    grid_step: float = 1.0  # spacing of the ERA5 sampling grid [deg]
-    mask_step: float = 0.2  # resolution of the cirrus mask for air-to-air rays [deg]
-    n_features: int = 512  # random Fourier features of the latent field
-    ray_samples: int = 24  # cloud test points per air-to-air ray
+    l_corr: float = 50e3  # horizontal correlation length of cloud occurrence [m]
+    lz_corr: float = 2e3  # vertical correlation length (cloud overlap) [m]
+    t_corr: float = 3600.0  # correlation time [s] (~ l_corr / wind speed)
+    de_ice: float = 50e-6  # effective diameter of cirrus ice crystals [m] (Fu 1996)
+    re_liquid: float = 10e-6  # effective radius of cloud droplets [m]
+    n_features: int = 256  # random Fourier features of the latent field
+    ray_samples: int = 48  # points per ray for the cloud integral
 
 
 @dataclass(frozen=True)

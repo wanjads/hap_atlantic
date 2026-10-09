@@ -1,208 +1,224 @@
-"""Cloud blockage of optical links from hourly ERA5 cloud cover.
+"""Cloud attenuation of optical links from hourly 3D ERA5 cloud fields.
 
-ERA5 (Hersbach et al. 2020, 0.25 deg, hourly) is read through the Open-Meteo archive API
-(https://open-meteo.com/en/docs/historical-weather-api, no registration) on a regular
-lat/lon grid that covers the corridor. Responses are cached as JSON in data/weather.
+Data: ERA5 (Hersbach et al. 2020) on 0.25 deg and 37 pressure levels from the public,
+analysis-ready ARCO-ERA5 store on Google Cloud (Carver & Merose 2023; no account needed):
+fraction of cloud cover cc, specific cloud ice / liquid water content q_i / q_l, and the
+hourly total precipitation (for the RF fallback). Levels 1000-150 hPa (0.1-13.6 km in the
+standard atmosphere) over the corridor are cached in data/weather as one .npz per period.
 
-ERA5 gives the cloud *fraction* per layer (low < 2 km, mid 2-6 km, high > 6 km). Whether a
-given ray is blocked is decided by a latent standard Gaussian field Z(x, t) per layer:
-a point x in layer l is cloudy at time t if
+Model per time step t:
 
-    Phi(Z_l(x, t)) < c_l(x, t)            (high layer: f_cirrus * c_high)
-
-so the cloudy area matches the ERA5 fraction, and nearby points / times are cloudy
-together. Z has the covariance exp(-|dx|^2 / 2 L^2) * exp(-dt^2 / 2 T^2) and is drawn with
-random Fourier features, i.e. it is a deterministic function of (x, t, seed). Layers are
-independent (random overlap, the same assumption as P_clear = prod(1 - c_l)).
-
-* air-to-air rays stay above h_chord_min (7 km) and only cross the high layer: a ray is
-  blocked if any of its sample points lies in a cloudy cell of the high-layer mask;
-* ground links cross all three layers at the heights `layer_heights`;
-* RF fallback of a ground station fails when ERA5 precipitation exceeds rf_rain_max.
+* cloud occurrence: a point x (lat, lon, height) is inside a cloud if
+  Phi(Z(x, t)) < cc(x, t), where Z is a standard Gaussian field with covariance
+  exp(-dh^2 / 2 L^2) exp(-dz^2 / 2 L_z^2) exp(-dt^2 / 2 T^2) (random Fourier features,
+  deterministic given the seed). The cloudy volume therefore matches ERA5, nearby points
+  and consecutive time steps are correlated, and the vertical decorrelation length L_z
+  gives the usual exponential-random overlap of cloud layers.
+* in-cloud extinction: ice (Fu 1996) beta = IWC (a0 + a1 / D_e), IWC in g/m^3, D_e in um;
+  liquid (geometric optics) beta = 3 LWC / (2 rho_w r_e). In-cloud water contents are the
+  grid-box contents divided by cc.
+* a ray loses 10 log10(e) * integral(beta ds) dB; the loss enters the FSO link budget.
 """
 
 from __future__ import annotations
 
-import json
-import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import requests
 from scipy.special import ndtr
 
 from . import geometry as geo
 from .config import NORTH_ATLANTIC_BBOX, CloudParams
 
-URL = "https://archive-api.open-meteo.com/v1/archive"
-VARS = ["cloud_cover_low", "cloud_cover_mid", "cloud_cover_high", "precipitation"]
+ARCO = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 CACHE = Path("data/weather")
-CHUNK = 50  # locations per request
-LOW, MID, HIGH = 0, 1, 2
+P_TOP = 150  # highest level used [hPa]
+FU_A0, FU_A1 = -6.656e-3, 3.686  # Fu (1996), beta [1/m] = IWC [g/m^3] (a0 + a1 / De [um])
+RHO_W = 1000.0  # [kg/m^3]
+R_DRY = 287.05  # [J/(kg K)]
+DB = 10 / np.log(10)
 
 
-def _day(t: float) -> str:
-    return pd.Timestamp(t, unit="s", tz="UTC").strftime("%Y-%m-%d")
+def isa_height(p_hpa):
+    """Standard-atmosphere height [m] of a pressure level."""
+    return 44_330.8 * (1 - (np.asarray(p_hpa, float) / 1013.25) ** 0.190263)
 
 
-def fetch_grid(lats, lons, start: str, end: str, cache: Path = CACHE, pause: float = 6.0):
-    """Hourly ERA5 data on the grid lats x lons, start/end as YYYY-MM-DD (inclusive).
+def isa_density(p_hpa):
+    h = isa_height(p_hpa)
+    temp = np.maximum(288.15 - 0.0065 * h, 216.65)
+    return np.asarray(p_hpa, float) * 100 / (R_DRY * temp)
 
-    Returns (hours [s, UNIX], data[var] of shape (n_hours, n_lat, n_lon)).
-    """
-    folder = cache / (f"era5_grid_{lats[0]:g}_{lats[-1]:g}_{len(lats)}_{lons[0]:g}_{lons[-1]:g}_"
-                 f"{len(lons)}_{start}_{end}")
-    folder.mkdir(parents=True, exist_ok=True)
-    pts = [(la, lo) for la in lats for lo in lons]
-    raw = []
-    for i in range(0, len(pts), CHUNK):
-        f = folder / f"chunk_{i // CHUNK:04d}.json"
-        if not f.exists():
-            chunk = pts[i: i + CHUNK]
-            params = {
-                "latitude": ",".join(f"{la:g}" for la, _ in chunk),
-                "longitude": ",".join(f"{lo:g}" for _, lo in chunk),
-                "start_date": start, "end_date": end, "hourly": ",".join(VARS),
-                "models": "era5", "timezone": "GMT",
-            }
-            for attempt in range(6):
-                try:
-                    r = requests.get(URL, params=params, timeout=180)
-                    r.raise_for_status()
-                    break
-                except requests.RequestException:
-                    if attempt == 5:
-                        raise
-                    time.sleep(30 * (attempt + 1))
-            out = r.json()
-            out = out if isinstance(out, list) else [out]
-            f.write_text(json.dumps([{"hourly": o["hourly"]} for o in out]))
-            time.sleep(pause)  # free tier: 600 location-calls per minute
-        raw += json.loads(f.read_text())
-    t = pd.to_datetime(raw[0]["hourly"]["time"], utc=True)
-    hours = ((t - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(seconds=1)).to_numpy(float)
-    data = {}
-    for v in VARS:
-        a = np.array([d["hourly"][v] for d in raw], dtype=float)  # (n_pts, n_hours)
-        a = np.nan_to_num(a, nan=0.0)
-        data[v] = a.T.reshape(len(hours), len(lats), len(lons))
-    return hours, data
+
+def fetch_arco(t_start: float, t_end: float, bbox=NORTH_ATLANTIC_BBOX, cache: Path = CACHE,
+               threads: int = 8) -> Path:
+    """Download the hourly 3D cloud fields covering [t_start, t_end] [s, UNIX] into one .npz."""
+    h0, h1 = np.floor(t_start / 3600) * 3600, np.ceil(t_end / 3600) * 3600
+    start = pd.Timestamp(h0, unit="s").strftime("%Y%m%dT%H")
+    end = pd.Timestamp(h1, unit="s").strftime("%Y%m%dT%H")
+    f = cache / f"arco_{start}_{end}.npz"
+    if f.exists():
+        return f
+    import xarray as xr
+
+    ds = xr.open_zarr(ARCO, chunks=None, storage_options={"token": "anon"})
+    lamin, lamax, lomin, lomax = bbox
+    times = pd.date_range(pd.Timestamp(h0, unit="s"), pd.Timestamp(h1, unit="s"), freq="h").values
+    it = np.searchsorted(ds.time.values, times)
+    lat = ds.latitude.values
+    ilat = np.flatnonzero((lat >= lamin) & (lat <= lamax))[::-1]  # ascending latitude
+    lon = (ds.longitude.values + 180) % 360 - 180
+    ilon = np.flatnonzero((lon >= lomin) & (lon <= lomax))
+    ilon = ilon[np.argsort(lon[ilon])]
+    lev = ds.level.values
+    ilev = np.flatnonzero(lev >= P_TOP)[::-1]  # 1000 hPa first = ascending height
+
+    def one(i):
+        out = {}
+        for v in ("fraction_of_cloud_cover", "specific_cloud_ice_water_content",
+                  "specific_cloud_liquid_water_content"):
+            a = ds[v].isel(time=int(i)).values  # one chunk = all levels, whole globe
+            out[v] = a[np.ix_(ilev, ilat, ilon)]
+        tp = ds["total_precipitation"].isel(time=int(i)).values
+        out["tp"] = tp[np.ix_(ilat, ilon)]
+        return out
+
+    with ThreadPoolExecutor(threads) as ex:
+        hours = list(ex.map(one, it))
+    cache.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        f,
+        hours=times.astype("datetime64[s]").astype(float),
+        levels=lev[ilev].astype(float), lats=lat[ilat], lons=lon[ilon],
+        cc=np.stack([h["fraction_of_cloud_cover"] for h in hours]).astype(np.float16),
+        qi=np.stack([h["specific_cloud_ice_water_content"] for h in hours]).astype(np.float32),
+        ql=np.stack([h["specific_cloud_liquid_water_content"] for h in hours]).astype(np.float32),
+        tp=np.stack([h["tp"] for h in hours]).astype(np.float32) * 1e3,  # m -> mm per hour
+    )
+    return f
 
 
 class LatentField:
-    """Standard Gaussian space-time field via random Fourier features (deterministic)."""
+    """Standard Gaussian space-time field via random Fourier features (deterministic).
 
-    def __init__(self, l_corr: float, t_corr: float, n_features: int, seed: int):
+    Anisotropic: horizontal length l_corr, vertical length lz_corr, time t_corr.
+    """
+
+    def __init__(self, l_corr: float, lz_corr: float, t_corr: float, n_features: int,
+                 seed: int, radius: float = 6_371_008.8):
         rng = np.random.default_rng(seed)
         self.w = rng.standard_normal((3, n_features)) / l_corr
+        self.wz = rng.standard_normal(n_features) / lz_corr
         self.nu = rng.standard_normal(n_features) / t_corr
         self.phi = rng.uniform(0, 2 * np.pi, n_features)
         self.scale = np.sqrt(2.0 / n_features)
+        self.radius = radius
 
-    def __call__(self, xyz: np.ndarray, t: float) -> np.ndarray:
-        """Z at Cartesian points xyz (..., 3) [m] and time t [s]."""
-        arg = xyz @ self.w + (self.nu * t + self.phi)
-        return self.scale * np.cos(arg).sum(axis=-1)
+    def __call__(self, xyz: np.ndarray, t: float, z=0.0, chunk: int = 20_000) -> np.ndarray:
+        """Z at surface points xyz (n, 3) [m] (horizontal position), heights z [m], time t."""
+        xyz = np.asarray(xyz, float).reshape(-1, 3)
+        z = np.broadcast_to(np.asarray(z, float), (len(xyz),))
+        out = np.empty(len(xyz))
+        for s in range(0, len(xyz), chunk):
+            arg = (xyz[s: s + chunk] @ self.w + np.outer(z[s: s + chunk], self.wz)
+                   + (self.nu * t + self.phi))
+            out[s: s + chunk] = self.scale * np.cos(arg).sum(axis=-1)
+        return out
 
 
 class CloudField:
-    """ERA5 cloud fractions + latent fields; `at(t)` gives the cloud state at time t."""
+    """3D ERA5 cloud fields + latent occurrence field; `at(t)` gives the state at time t."""
 
     def __init__(self, t_start: float, t_end: float, cp: CloudParams, seed: int,
-                 radius: float, bbox=NORTH_ATLANTIC_BBOX):
-        lamin, lamax, lomin, lomax = bbox
-        self.lats = np.arange(lamin, lamax + 1e-9, cp.grid_step)
-        self.lons = np.arange(lomin, lomax + 1e-9, cp.grid_step)
-        self.hours, self.data = fetch_grid(self.lats, self.lons, _day(t_start), _day(t_end))
+                 radius: float):
+        d = np.load(fetch_arco(t_start, t_end))
+        self.hours, self.lats, self.lons = d["hours"], d["lats"], d["lons"]
+        self.levels = d["levels"]
+        self.heights = isa_height(self.levels)
+        self.cc = d["cc"]
+        # in-cloud extinction [1/m], hour by hour to keep the memory small (~70 MB per day)
+        rho = isa_density(self.levels)[:, None, None]
+        qi, ql = d["qi"], d["ql"]
+        self.beta = np.empty(self.cc.shape, dtype=np.float16)
+        for k in range(len(self.hours)):
+            cc = np.maximum(self.cc[k].astype(np.float32), 0.01)
+            iwc = qi[k] * rho / cc * 1e3  # in-cloud [g/m^3]
+            lwc = ql[k] * rho / cc  # in-cloud [kg/m^3]
+            self.beta[k] = (iwc * (FU_A0 + FU_A1 / (cp.de_ice * 1e6))
+                            + 3 * lwc / (2 * RHO_W * cp.re_liquid))
+        del qi, ql
+        self.tp = d["tp"]
         self.cp, self.radius = cp, radius
-        # one independent latent field per layer, seeds derived from the run seed
-        self.z = [LatentField(cp.l_corr, cp.t_corr, cp.n_features, 1000 * seed + k)
-                  for k in range(3)]
-        # high-layer mask grid for air-to-air rays
-        self.mlats = np.arange(lamin, lamax + 1e-9, cp.mask_step)
-        self.mlons = np.arange(lomin, lomax + 1e-9, cp.mask_step)
-        mlat, mlon = np.meshgrid(self.mlats, self.mlons, indexing="ij")
-        self.mxyz = geo.to_ecef(mlat, mlon, 0.0, radius)
+        self.z = LatentField(cp.l_corr, cp.lz_corr, cp.t_corr, cp.n_features, 1000 + seed,
+                             radius)
+        glat, glon = np.meshgrid(self.lats, self.lons, indexing="ij")
+        self.gxyz = geo.to_ecef(glat, glon, 0.0, radius)  # (ny, nx, 3)
 
-    def cover(self, layer: int, lat, lon, t: float) -> np.ndarray:
-        """ERA5 cover fraction [0, 1] of a layer, bilinear in space, linear in time."""
-        v = VARS[layer]
-        return self._interp(self.data[v], lat, lon, t) / 100.0
-
-    def rain(self, lat, lon, t: float) -> np.ndarray:
-        return self._interp(self.data["precipitation"], lat, lon, t)
-
-    def _interp(self, a, lat, lon, t):
-        k = np.clip(np.searchsorted(self.hours, t, side="right") - 1, 0, len(self.hours) - 2)
-        ft = np.clip((t - self.hours[k]) / (self.hours[k + 1] - self.hours[k]), 0.0, 1.0)
-        lat, lon = np.asarray(lat, float), np.asarray(lon, float)
-        fi = np.clip((lat - self.lats[0]) / self.cp.grid_step, 0, len(self.lats) - 1.000001)
-        fj = np.clip((lon - self.lons[0]) / self.cp.grid_step, 0, len(self.lons) - 1.000001)
-        i, j = fi.astype(int), fj.astype(int)
-        di, dj = fi - i, fj - j
-        out = 0.0
-        for kk, wt in ((k, 1 - ft), (k + 1, ft)):
-            g = a[kk]
-            out = out + wt * ((1 - di) * (1 - dj) * g[i, j] + (1 - di) * dj * g[i, j + 1]
-                              + di * (1 - dj) * g[i + 1, j] + di * dj * g[i + 1, j + 1])
-        return out
-
-    def cloudy(self, layer: int, lat, lon, t: float) -> np.ndarray:
-        c = self.cover(layer, lat, lon, t)
-        if layer == HIGH:
-            c = self.cp.f_cirrus * c
-        u = ndtr(self.z[layer](geo.to_ecef(lat, lon, 0.0, self.radius), t))
-        return u < c
+    def _time(self, t):
+        k = int(np.clip(np.searchsorted(self.hours, t, side="right") - 1, 0,
+                        len(self.hours) - 2))
+        f = float(np.clip((t - self.hours[k]) / (self.hours[k + 1] - self.hours[k]), 0, 1))
+        return k, f
 
     def at(self, t: float) -> CloudState:
-        mlat, mlon = np.meshgrid(self.mlats, self.mlons, indexing="ij")
-        c = self.cp.f_cirrus * self.cover(HIGH, mlat, mlon, t)
-        mask = ndtr(self.z[HIGH](self.mxyz, t)) < c
-        return CloudState(self, t, mask)
+        k, f = self._time(t)
+        cc = (1 - f) * self.cc[k].astype(np.float32) + f * self.cc[k + 1].astype(np.float32)
+        b0, b1 = self.beta[k].astype(np.float32), self.beta[k + 1].astype(np.float32)
+        beta = (1 - f) * b0 + f * b1
+        ext = np.zeros_like(beta)
+        sel = np.nonzero(cc > 1e-3)  # latent field only where clouds are possible
+        if sel[0].size:
+            xyz = self.gxyz[sel[1], sel[2]]
+            u = ndtr(self.z(xyz, t, self.heights[sel[0]]))
+            inside = u < cc[sel]
+            ext[sel[0][inside], sel[1][inside], sel[2][inside]] = beta[sel][inside]
+        rain = (1 - f) * self.tp[k] + f * self.tp[k + 1]
+        return CloudState(self, ext, rain)
 
 
 class CloudState:
-    """Cloud state at one time step."""
+    """Cloud extinction field (level, lat, lon) [1/m] at one time step."""
 
-    def __init__(self, field: CloudField, t: float, high_mask: np.ndarray):
-        self.f, self.t, self.mask = field, t, high_mask
+    def __init__(self, field: CloudField, ext: np.ndarray, rain: np.ndarray):
+        self.f, self.ext, self.rain_field = field, ext, rain
+        h = field.heights
+        self._hedges = (h[1:] + h[:-1]) / 2
 
-    def _mask_lookup(self, lat, lon):
+    def _lookup(self, lat, lon, h):
         f = self.f
-        i = np.clip(np.rint((lat - f.mlats[0]) / f.cp.mask_step).astype(int), 0, len(f.mlats) - 1)
-        j = np.clip(np.rint((lon - f.mlons[0]) / f.cp.mask_step).astype(int), 0, len(f.mlons) - 1)
-        return self.mask[i, j]
+        i = np.clip(np.rint((lat - f.lats[0]) / 0.25).astype(int), 0, len(f.lats) - 1)
+        j = np.clip(np.rint((lon - f.lons[0]) / 0.25).astype(int), 0, len(f.lons) - 1)
+        lev = np.searchsorted(self._hedges, h)
+        return np.where(h <= f.heights[-1] + 500, self.ext[lev, i, j], 0.0)
 
-    def air_clear(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        """Air-to-air rays a->b (n, 3) that do not cross a cloudy high-layer cell."""
+    def ray_loss_db(self, a: np.ndarray, b: np.ndarray, n: int | None = None) -> np.ndarray:
+        """Cloud loss [dB] of straight rays a -> b (m, 3), positions incl. radius + height."""
         if len(a) == 0:
-            return np.zeros(0, dtype=bool)
-        s = (np.arange(self.f.cp.ray_samples) + 0.5) / self.f.cp.ray_samples
-        p = a[:, None, :] + s[:, None] * (b - a)[:, None, :]
-        lat, lon = geo.to_latlon(p)
-        return ~self._mask_lookup(lat, lon).any(axis=1)
-
-    def ground_clear(self, g: np.ndarray, targets: np.ndarray) -> np.ndarray:
-        """Ground (3,) -> aircraft (n, 3) rays that cross no cloudy layer."""
-        hg = np.linalg.norm(g) - self.f.radius
-        ht = np.linalg.norm(targets, axis=-1) - self.f.radius
-        clear = np.ones(len(targets), dtype=bool)
-        for layer, h in enumerate(self.f.cp.layer_heights):
-            frac = np.clip((h - hg) / np.maximum(ht - hg, 1.0), 0.0, 1.0)
-            p = g + frac[:, None] * (targets - g)
+            return np.zeros(0)
+        n = n or self.f.cp.ray_samples
+        out = np.empty(len(a))
+        s = (np.arange(n) + 0.5) / n
+        step = max(1, 100_000 // n)
+        for c in range(0, len(a), step):
+            aa, bb = a[c: c + step], b[c: c + step]
+            p = aa[:, None, :] + s[:, None] * (bb - aa)[:, None, :]
             lat, lon = geo.to_latlon(p)
-            blocked = (self._mask_lookup(lat, lon) if layer == HIGH
-                       else self.f.cloudy(layer, lat, lon, self.t))
-            clear &= ~(blocked & (ht > h))
-        return clear
+            h = np.linalg.norm(p, axis=-1) - self.f.radius
+            seg = np.linalg.norm(bb - aa, axis=-1) / n
+            out[c: c + step] = DB * self._lookup(lat, lon, h).sum(axis=1) * seg
+        return out
 
-    def zenith_clear(self, lat, lon) -> bool:
-        lat, lon = np.atleast_1d(lat), np.atleast_1d(lon)
-        ok = ~self._mask_lookup(lat, lon)
-        for layer in (LOW, MID):
-            ok &= ~self.f.cloudy(layer, lat, lon, self.t)
-        return bool(ok[0])
+    def zenith_loss_db(self, lat, lon) -> float:
+        """Cloud loss of a vertical ray from the ground to 13 km."""
+        R = self.f.radius
+        a = geo.to_ecef(lat, lon, 0.0, R)[None]
+        b = geo.to_ecef(lat, lon, 13e3, R)[None]
+        return float(self.ray_loss_db(a, b, n=64)[0])
 
     def rain_ok(self, lat, lon, rain_max: float) -> bool:
-        return bool(self.f.rain(np.atleast_1d(lat), np.atleast_1d(lon), self.t)[0] <= rain_max)
+        f = self.f
+        i = int(np.clip(np.rint((lat - f.lats[0]) / 0.25), 0, len(f.lats) - 1))
+        j = int(np.clip(np.rint((lon - f.lons[0]) / 0.25), 0, len(f.lons) - 1))
+        return bool(self.rain_field[i, j] <= rain_max)

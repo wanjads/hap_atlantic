@@ -79,8 +79,9 @@ def yao_sparsify(pairs: np.ndarray, d: np.ndarray, lat, lon, cones: int) -> np.n
 def build_graph(snap: pd.DataFrame, p: Params, clouds: CloudState | None = None) -> nx.Graph:
     """Candidate graph for one snapshot (aircraft positions in `snap`).
 
-    clouds: cloud state at the snapshot time (None = clear sky). Cloud-blocked air-to-air
-    rays are removed before the Yao sparsification, so that clear alternatives survive.
+    clouds: cloud state at the snapshot time (None = clear sky). The cloud loss of every ray
+    enters its link budget; links below r_min are dropped before the Yao sparsification,
+    so that clear alternatives survive.
     """
     g_par, term, atm = p.geometry, p.terminal, p.atmosphere
     r_eff = g_par.earth_radius * g_par.k_refraction
@@ -105,27 +106,28 @@ def build_graph(snap: pd.DataFrame, p: Params, clouds: CloudState | None = None)
         if len(pairs):
             a, b = pos[pairs[:, 0]], pos[pairs[:, 1]]
             ok = geo.chord_min_height(a, b, r_eff) >= g_par.h_chord_min
-            if clouds is not None:
-                ok[ok] = clouds.air_clear(a[ok], b[ok])
             pairs, a, b = pairs[ok], a[ok], b[ok]
             d = np.linalg.norm(b - a, axis=-1)
-            if g_par.yao_cones:
+            loss = clouds.ray_loss_db(a, b) if clouds is not None else 0.0
+            rate = link_rate(d, geo.chord_heights(a, b, r_eff, g_par.ray_samples), term, atm,
+                             extra_loss_db=loss, capped=False)
+            ok = rate >= term.r_min  # cloud-blocked rays drop out before the sparsification
+            pairs, d, rate = pairs[ok], d[ok], rate[ok]
+            if g_par.yao_cones and len(pairs):
                 keep = yao_sparsify(pairs, d, snap["lat"].to_numpy(), snap["lon"].to_numpy(),
                                     g_par.yao_cones)
-                pairs, a, b, d = pairs[keep], a[keep], b[keep], d[keep]
-            rate = link_rate(d, geo.chord_heights(a, b, r_eff, g_par.ray_samples), term, atm,
-                             capped=False)
+                pairs, d, rate = pairs[keep], d[keep], rate[keep]
             for (i, j), dist, r in zip(pairs, d, rate, strict=True):
-                if r > 0:
-                    G.add_edge(ids[i], ids[j], kind="air", rate=float(r),
-                               cap=float(min(r, term.r_max)), dist=float(dist),
-                               delay=float(dist * N_AIR / C0 + term.hop_delay))
+                G.add_edge(ids[i], ids[j], kind="air", rate=float(r),
+                           cap=float(min(r, term.r_max)), dist=float(dist),
+                           delay=float(dist * N_AIR / C0 + term.hop_delay))
 
     # --- ground stations ------------------------------------------------------------------
     for gs in ground_stations(p):
-        zenith = True if clouds is None else clouds.zenith_clear(gs.site.lat, gs.site.lon)
+        zen = 0.0 if clouds is None else clouds.zenith_loss_db(gs.site.lat, gs.site.lon)
         G.add_node(gs.name, kind="ground", terminals=p.ground.terminals_per_site,
-                   lat=gs.site.lat, lon=gs.site.lon, alt=gs.site.alt, clear=zenith)
+                   lat=gs.site.lat, lon=gs.site.lon, alt=gs.site.alt, zenith_loss_db=zen,
+                   clear=zen < 3.0)
         G.add_edge(gs.endpoint, gs.name, kind="fiber", rate=np.inf, cap=np.inf, dist=0.0,
                    delay=gs.fiber_delay)
         if len(ids) == 0:
@@ -137,14 +139,13 @@ def build_graph(snap: pd.DataFrame, p: Params, clouds: CloudState | None = None)
             continue
         a = np.broadcast_to(gpos, (sel.size, 3))
         d = np.linalg.norm(pos[sel] - a, axis=-1)
+        loss = clouds.ray_loss_db(np.ascontiguousarray(a), pos[sel]) if clouds is not None else 0.0
         rate = link_rate(d, geo.chord_heights(a, pos[sel], r_eff, g_par.ray_samples), term, atm,
-                         capped=False)
-        clear = np.ones(sel.size, dtype=bool) if clouds is None else clouds.ground_clear(
-            gpos, pos[sel])
+                         extra_loss_db=loss, capped=False)
         rf = p.ground.rf_rate > 0 and (clouds is None or clouds.rain_ok(
             gs.site.lat, gs.site.lon, p.ground.rf_rain_max))
-        for k, dist, r, ok in zip(sel, d, rate, clear, strict=True):
-            if ok and r > 0:
+        for k, dist, r in zip(sel, d, rate, strict=True):
+            if r >= term.r_min:
                 medium, r = "optical", float(r)
             elif rf:
                 medium, r = "rf", p.ground.rf_rate

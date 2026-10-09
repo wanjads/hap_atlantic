@@ -127,7 +127,7 @@ def test_select_fleet():
 def test_latent_field_statistics():
     from hap_atlantic.weather import LatentField
 
-    z = LatentField(50e3, 3600.0, 2048, seed=3)
+    z = LatentField(50e3, 2e3, 3600.0, 2048, seed=3)
     rng = np.random.default_rng(0)
     x = rng.uniform(-5e6, 5e6, (4000, 3))
     v = z(x, 0.0)
@@ -136,6 +136,18 @@ def test_latent_field_statistics():
     near = z(x + [5e3, 0, 0], 0.0)
     far = z(x + [200e3, 0, 0], 0.0)
     assert np.corrcoef(v, near)[0, 1] > 0.9 and abs(np.corrcoef(v, far)[0, 1]) < 0.15
+    # vertical: correlated at 0.5 km, nearly independent at 8 km
+    assert np.corrcoef(v, z(x, 0.0, 500.0))[0, 1] > 0.9
+    assert abs(np.corrcoef(v, z(x, 0.0, 8e3))[0, 1]) < 0.15
+
+
+def test_cloud_extinction_fu():
+    from hap_atlantic.weather import FU_A0, FU_A1, isa_height
+
+    # 0.01 g/m^3 of ice with De = 50 um: about 0.67 / km, i.e. ~2.9 dB/km
+    beta = 0.01 * (FU_A0 + FU_A1 / 50.0)
+    assert 2.5 < 10 / np.log(10) * beta * 1e3 < 3.3
+    assert abs(isa_height(250.0) - 10_363) < 50
 
 
 def test_adsblol_parse_trace():

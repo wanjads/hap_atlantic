@@ -46,7 +46,6 @@ def main(argv=None) -> None:
     sim.add_argument("--every", type=int, default=10, help="evaluate every n-th time step")
     sim.add_argument("--sites", type=int, default=None, help="ground stations per endpoint")
     sim.add_argument("--clouds", choices=["clear", "era5"], default="clear")
-    sim.add_argument("--f-cirrus", type=float, default=None)
     sim.add_argument("--rf-rate", type=float, default=None, help="RF fallback rate [Gbit/s]")
     sim.add_argument("--equipage", type=float, default=None)
     sim.add_argument("--all-aircraft", action="store_true", help="not only jet airliners")
@@ -56,9 +55,9 @@ def main(argv=None) -> None:
     sim.add_argument("--workers", type=int, default=1)
     sim.add_argument("--out", default=None)
 
-    w = sub.add_parser("weather", help="download and cache the ERA5 grid (Open-Meteo)")
-    w.add_argument("--start", required=True, help="YYYY-MM-DD")
-    w.add_argument("--end", required=True, help="YYYY-MM-DD (inclusive)")
+    w = sub.add_parser("weather", help="download and cache 3D ERA5 cloud fields (ARCO-ERA5)")
+    w.add_argument("--start", required=True, help="UTC, e.g. '2023-07-08 23:00'")
+    w.add_argument("--end", required=True, help="UTC, e.g. '2023-07-10 01:00'")
 
     sub.add_parser("bounds", help="print latency benchmarks Frankfurt - New York")
 
@@ -106,8 +105,6 @@ def main(argv=None) -> None:
             p = replace(p, ground=replace(p.ground, n_sites=args.sites))
         if args.rf_rate is not None:
             p = replace(p, ground=replace(p.ground, rf_rate=args.rf_rate * 1e9))
-        if args.f_cirrus is not None:
-            p = replace(p, clouds=replace(p.clouds, f_cirrus=args.f_cirrus))
         if args.equipage is not None:
             p = replace(p, equipage=args.equipage)
         if args.seed is not None:
@@ -125,16 +122,11 @@ def main(argv=None) -> None:
         print(f"connected {res['connected'].mean():.1%}, median min delay "
               f"{res.loc[res['connected'], 'min_delay'].median() * 1e3:.2f} ms")
     elif args.cmd == "weather":
-        import numpy as np
+        from .weather import fetch_arco
 
-        from .config import NORTH_ATLANTIC_BBOX as B
-        from .config import CloudParams
-        from .weather import fetch_grid
-
-        step = CloudParams().grid_step
-        hours, _ = fetch_grid(np.arange(B[0], B[1] + 1e-9, step),
-                              np.arange(B[2], B[3] + 1e-9, step), args.start, args.end)
-        print(f"{len(hours)} hours cached in data/weather")
+        f = fetch_arco(pd.Timestamp(args.start, tz="UTC").timestamp(),
+                       pd.Timestamp(args.end, tz="UTC").timestamp())
+        print(f"cached in {f}")
     elif args.cmd == "bounds":
         from .reference import benchmarks
 

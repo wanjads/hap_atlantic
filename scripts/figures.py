@@ -66,7 +66,7 @@ def fig_map(day="summer", hour=12.0):
     path, d = DAY_FILES[day]
     t = pd.Timestamp(d, tz="UTC").timestamp() + hour * 3600
     p = scenario("leo")
-    p = replace(p, clouds=replace(p.clouds, model="era5", f_cirrus=0.5))
+    p = replace(p, clouds=replace(p.clouds, model="era5"))
     states = pd.read_parquet(path)
     snap = select_fleet(states[states.time == t], True, 1.0, 0)
     t0 = pd.Timestamp(d, tz="UTC").timestamp()
@@ -88,7 +88,9 @@ def fig_map(day="summer", hour=12.0):
     ax.set_extent([-80, 14, 34, 66], crs=pc)
     ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="#eeeeee", edgecolor="none")
     ax.add_feature(cfeature.COASTLINE.with_scale("110m"), linewidth=0.4, color="0.5")
-    ax.pcolormesh(field.mlons, field.mlats, np.where(cs.mask, 1.0, np.nan), transform=pc,
+    cruise = (field.heights >= 8e3) & (field.heights <= 12.5e3)
+    cloud = (cs.ext[cruise] > 0).any(axis=0)  # cloud somewhere at cruise level
+    ax.pcolormesh(field.lons, field.lats, np.where(cloud, 1.0, np.nan), transform=pc,
                   cmap=mpl.colors.ListedColormap(["#9ecae1"]), alpha=0.6, shading="nearest",
                   rasterized=True)
     pos = {v: (dd["lon"], dd["lat"]) for v, dd in G.nodes(data=True) if "lon" in dd}
@@ -114,8 +116,8 @@ def fig_map(day="summer", hour=12.0):
             color="#e6550d", lw=0.6, ls=":")
     n_clear = sum(1 for *_, k in G.edges(data="kind") if k == "air")
     ax.text(0.01, 0.02, f"{DAYS[day]}, {hour:02.0f}:00 UTC: {len(xy)} airliners\n"
-            f"{n_clear} clear (grey) / {len(blocked)} cirrus-blocked (red) links, "
-            f"$f_\\mathrm{{ci}}=0.5$\n{path_label} {delay * 1e3:.2f} ms "
+            f"{n_clear} usable (grey) / {len(blocked)} cloud-blocked (red) links, "
+            f"blue: cloud at 8-12.5 km\n{path_label} {delay * 1e3:.2f} ms "
             f"({len(path_nodes) - 1} hops, orange)", transform=ax.transAxes,
             fontsize=6, bbox={"fc": "white", "ec": "none", "alpha": 0.85}, zorder=7)
     _save(fig, "fig_map")
@@ -236,34 +238,22 @@ def fig_latency():
 
 
 def fig_weather():
-    fig, axes = plt.subplots(1, 2, figsize=(FULL, 2.3))
-    width = 0.2
-    for ai, day in enumerate(DAYS):
+    fig, ax = plt.subplots(figsize=(COL, 2.2))
+    variants = [(1, 0.0, "1 station"), (5, 0.0, "5 stations"), (1, 10.0, "1 st. + RF"),
+                (5, 10.0, "5 st. + RF")]
+    for di, day in enumerate(DAYS):
         df = _read(f"weather_{day}")
         if df is None:
             continue
         df["avail"] = df["e2e_leo_k2"] > 0
-        g = df.groupby(["f_cirrus", "sites", "rf_gbps", "seed"])["avail"].mean().reset_index()
-        ax = axes[ai]
-        variants = [(1, 0.0, "1 station, optical"), (5, 0.0, "5 stations, optical"),
-                    (1, 10.0, "1 station, + RF"), (5, 10.0, "5 stations, + RF")]
-        fcis = sorted(g["f_cirrus"].unique())
-        for vi, (s, rf, lab) in enumerate(variants):
-            sel = g[(g.sites == s) & (g.rf_gbps == rf)].groupby("f_cirrus")["avail"]
-            m, sd = sel.mean().reindex(fcis), sel.std().reindex(fcis)
-            ax.bar(np.arange(len(fcis)) + (vi - 1.5) * width, m, width, yerr=sd, capsize=1.5,
-                   label=lab, color=["#c6dbef", "#6baed6", "#fdd0a2", "#fd8d3c"][vi],
-                   error_kw={"lw": 0.6})
-        clear = _read(f"tech_{day}")
-        if clear is not None:
-            ax.axhline((clear["e2e_leo_k2"] > 0).mean(), color="k", lw=0.8, ls="--")
-            ax.text(-0.45, (clear["e2e_leo_k2"] > 0).mean() + 0.02, "clear sky, 1 station",
-                    fontsize=6)
-        ax.set_xticks(range(len(fcis)), [f"$f_\\mathrm{{ci}}={f:g}$" for f in fcis])
-        ax.set_ylim(0, 1.05)
-        ax.set_title(DAYS[day], fontsize=8)
-        ax.set_ylabel("e2e availability (capacity > 0)")
-    axes[0].legend(fontsize=6, loc="upper right")
+        g = df.groupby(["sites", "rf_gbps", "seed"])["avail"].mean()
+        m = [g.loc[s, rf].mean() for s, rf, _ in variants]
+        sd = [g.loc[s, rf].std() for s, rf, _ in variants]
+        ax.bar(np.arange(4) + (di - 0.5) * 0.4, m, 0.4, yerr=sd, capsize=1.5, label=DAYS[day])
+    ax.set_xticks(range(4), [v[2] for v in variants])
+    ax.set_ylabel("e2e availability (capacity > 0)")
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=6)
     _save(fig, "fig_weather")
 
 

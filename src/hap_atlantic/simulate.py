@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 
 import networkx as nx
 import numpy as np
@@ -125,6 +126,26 @@ def _chunk(args):
     return rows
 
 
+def _mem_available() -> float:
+    """MemAvailable from /proc/meminfo [bytes] (inf if unknown)."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return float(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return float("inf")
+
+
+def safe_workers(workers: int, clouds: bool) -> int:
+    """Limit the number of processes so that they use at most 60 % of the free memory.
+
+    Measured peak per worker: ~0.8 GB clear sky, ~1.8 GB with 3D ERA5 clouds.
+    """
+    per_worker = (2.0 if clouds else 1.0) * 1024**3
+    return max(1, min(workers, int(0.6 * _mem_available() / per_worker)))
+
+
 def run(states: pd.DataFrame, p: Params, configs, t0: float, t1: float, every: int = 10,
         metrics=METRICS, workers: int = 1, milp_time: float = 60.0) -> pd.DataFrame:
     """Evaluate every `every`-th grid time step in [t0, t1).
@@ -138,7 +159,7 @@ def run(states: pd.DataFrame, p: Params, configs, t0: float, t1: float, every: i
     by_t = {t: g for t, g in states[states["time"].isin(times)].groupby("time")}
     snaps = [(t, by_t.get(t, states.iloc[:0])) for t in times]
     t_range = (t0 - 3600.0, t1 + 3600.0)  # weather window (whole days are fetched)
-    n = max(1, min(workers, len(snaps)))
+    n = max(1, min(safe_workers(workers, p.clouds.model == "era5"), len(snaps)))
     chunks = [(snaps[i::n], p, configs, metrics, t_range, milp_time) for i in range(n)]
     if n == 1:
         rows = _chunk(chunks[0])
