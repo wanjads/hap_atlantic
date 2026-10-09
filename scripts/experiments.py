@@ -35,7 +35,7 @@ DAYS = {
     "winter": ("data/processed/20240115-17.parquet", "2024-01-16"),
 }
 OUT = Path("results")
-SEEDS = (0, 1, 2, 3, 4)
+SEEDS = (0, 1, 2)
 WORKERS = 16
 
 
@@ -77,7 +77,7 @@ def exp_equipage(days):
 
 def exp_weather(days):
     p0 = scenario("leo")
-    configs = [tech_config("leo", 2, p0), tech_config("leo", 4, p0)]
+    configs = [tech_config("leo", 2, p0)]
     for d in days:
         states, t0, t1 = _day(d)
         rows = []
@@ -142,7 +142,10 @@ def _paths_chunk(args):
 
 
 def exp_paths(days):
+    # full candidate graph: the Yao sparsification picks a different link set every minute,
+    # which would end paths whose links are still physically available
     p0 = scenario("leo")
+    p0 = replace(p0, geometry=replace(p0.geometry, yao_cones=0))
     for d, wx in itertools.product(days, ("clear", "era5")):
         p = replace(p0, clouds=replace(p0.clouds, model=wx))
         states, t0, t1 = _day(d)

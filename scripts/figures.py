@@ -221,14 +221,14 @@ def fig_latency():
              ("HF (scaled)", ref["hf_scaled"]), ("fibre bound", ref["fibre_great_circle"]),
              ("fibre+MW", ref["fibre_microwave_published"]),
              ("fibre", ref["fibre_best_published"])]
-    for i, (lab, v) in enumerate(lines):
+    for lab, v in lines:
         ax.axvline(v * 1e3, color="0.3", lw=0.6, ls=":")
-        ax.text(v * 1e3 + 0.1, 0.05 + 0.13 * (i % 6), lab, fontsize=5.5, rotation=0)
+        ax.text(v * 1e3 + 0.12, 0.98, lab, fontsize=5.5, rotation=90, va="top")
     ax.set_xlim(20, 35)
     ax.set_ylim(0, 1)
     ax.set_xlabel("one-way latency Frankfurt–New York [ms]")
-    ax.set_ylabel("fraction of time $\\leq x$")
-    ax.legend(loc="center right", fontsize=5.5)
+    ax.legend(loc="center right", fontsize=5.5, bbox_to_anchor=(0.88, 0.5))
+    ax.set_ylabel("fraction of time with latency $\\leq x$\n(plateau = availability)")
     _save(fig, "fig_latency")
 
 
