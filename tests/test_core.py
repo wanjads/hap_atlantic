@@ -140,11 +140,11 @@ def test_latent_field_statistics():
     assert abs(np.corrcoef(v, z(x, 0.0, 8e3))[0, 1]) < 0.15
 
 
-def test_cloud_extinction_fu():
-    from hap_atlantic.weather import FU_A0, FU_A1, isa_height
+def test_cloud_extinction_ice():
+    from hap_atlantic.weather import RHO_ICE, isa_height
 
-    # 0.01 g/m^3 of ice with De = 50 um: about 0.67 / km, i.e. ~2.9 dB/km
-    beta = 0.01 * (FU_A0 + FU_A1 / 50.0)
+    # 0.01 g/m^3 of ice with r_e = 25 um: about 0.65 / km, i.e. ~2.8 dB/km
+    beta = 3 * 1e-5 / (2 * RHO_ICE * 25e-6)
     assert 2.5 < 10 / np.log(10) * beta * 1e3 < 3.3
     assert abs(isa_height(250.0) - 10_363) < 50
 

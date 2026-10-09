@@ -92,7 +92,7 @@ class CloudParams:
     l_corr: float = 50e3  # horizontal correlation length of cloud occurrence [m]
     lz_corr: float = 2e3  # vertical correlation length (cloud overlap) [m]
     t_corr: float = 3600.0  # correlation time [s] (~ l_corr / wind speed)
-    de_ice: float = 50e-6  # effective diameter of cirrus ice crystals [m] (Fu 1996)
+    re_ice: float = 25e-6  # effective radius of cirrus ice crystals [m]
     re_liquid: float = 10e-6  # effective radius of cloud droplets [m]
     n_features: int = 256  # random Fourier features of the latent field
     ray_samples: int = 48  # points per ray for the cloud integral

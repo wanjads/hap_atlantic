@@ -14,8 +14,9 @@ Model per time step t:
   deterministic given the seed). The cloudy volume therefore matches ERA5, nearby points
   and consecutive time steps are correlated, and the vertical decorrelation length L_z
   gives the usual exponential-random overlap of cloud layers.
-* in-cloud extinction: ice (Fu 1996) beta = IWC (a0 + a1 / D_e), IWC in g/m^3, D_e in um;
-  liquid (geometric optics) beta = 3 LWC / (2 rho_w r_e). In-cloud water contents are the
+* in-cloud extinction (geometric optics, Francis et al. 1994, as in Roettenbacher et al.
+  2024): beta = 3 WC / (2 rho r_e) for ice (rho_ice, r_e = 25 um) and liquid water
+  (rho_w, r_e = 10 um), WC = water content [kg/m^3]. In-cloud water contents are the
   grid-box contents divided by cc.
 * a ray loses 10 log10(e) * integral(beta ds) dB; the loss enters the FSO link budget.
 """
@@ -35,7 +36,7 @@ from .config import NORTH_ATLANTIC_BBOX, CloudParams
 ARCO = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 CACHE = Path("data/weather")
 P_TOP = 150  # highest level used [hPa]
-FU_A0, FU_A1 = -6.656e-3, 3.686  # Fu (1996), beta [1/m] = IWC [g/m^3] (a0 + a1 / De [um])
+RHO_ICE = 916.7  # [kg/m^3]
 RHO_W = 1000.0  # [kg/m^3]
 R_DRY = 287.05  # [J/(kg K)]
 DB = 10 / np.log(10)
@@ -144,9 +145,9 @@ class CloudField:
         self.beta = np.empty(self.cc.shape, dtype=np.float16)
         for k in range(len(self.hours)):
             cc = np.maximum(self.cc[k].astype(np.float32), 0.01)
-            iwc = qi[k] * rho / cc * 1e3  # in-cloud [g/m^3]
+            iwc = qi[k] * rho / cc  # in-cloud [kg/m^3]
             lwc = ql[k] * rho / cc  # in-cloud [kg/m^3]
-            self.beta[k] = (iwc * (FU_A0 + FU_A1 / (cp.de_ice * 1e6))
+            self.beta[k] = (3 * iwc / (2 * RHO_ICE * cp.re_ice)
                             + 3 * lwc / (2 * RHO_W * cp.re_liquid))
         del qi, ql
         self.tp = d["tp"]

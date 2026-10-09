@@ -3,7 +3,8 @@
 Two days: 9 July 2023 (summer, all-time Shanwick record) and 16 January 2024 (winter
 weekday). One snapshot per hour (24 per day), always with ERA5 clouds and RF fallback of
 the ground links, minimum elevation 5 deg, minimum air-to-air ray height 3 km;
-capacities within 1 % of the upper bound (MILP limit 30 s; the bound is plotted).
+capacities within 1 % of the upper bound (MILP limit 30 s, snapshots still above 1 % are
+re-solved with 300 s; the bound is stored).
 
 * capacity: ground stations everywhere on land, Europe -> North America
 * latency:  Frankfurt -> New York (NY4), stations at the endpoints and on rings of 75 and
@@ -56,7 +57,9 @@ plt.rcParams.update({"font.family": "serif",
                      "mathtext.fontset": "stix", "font.size": 8, "axes.grid": True,
                      "grid.alpha": 0.3, "savefig.bbox": "tight", "savefig.dpi": 200})
 CABLE_ONE = 250e12  # Dunant (Dunant2021)
-CABLE_ALL = 1.2e15  # potential capacity of all trans-Atlantic cables (TeleGeography, TODO verify)
+# lower bound for all trans-Atlantic cables: Dunant 250 + Grace Hopper 352 + Amitie 400 +
+# Yellow 25 Tbit/s (Dunant2021, TeleGeography2022, Amitie2023); 17 cables in total
+CABLE_ALL = (250 + 352 + 400 + 25) * 1e12
 
 
 def _t0(day):
@@ -75,11 +78,20 @@ def _config(r_max, k, p):
                   k)
 
 
-def _run(day, configs, milp_time=30.0):
+def _run(day, configs, milp_time=30.0, retry_time=300.0):
+    """All 24 snapshots; snapshots that are still > 1 % from the bound are re-solved."""
     tic = time.time()
     t0 = _t0(day)
-    r = run(_states(day), scenario("leo"), configs, t0, t0 + 86400, every=1, workers=WORKERS,
+    states = _states(day)
+    r = run(states, scenario("leo"), configs, t0, t0 + 86400, every=1, workers=WORKERS,
             milp_time=milp_time)
+    cols = [f"cap_{c.label}" for c in configs]
+    hard = r[np.any([r[c] < 0.99 * r[f"{c}_bound"] for c in cols], axis=0)]["time"]
+    if len(hard):
+        print(f"  {day}: re-solving {len(hard)} snapshots with {retry_time:.0f} s", flush=True)
+        r2 = run(states[states["time"].isin(hard)], scenario("leo"), configs, t0, t0 + 86400,
+                 every=1, workers=WORKERS, milp_time=retry_time)
+        r = pd.concat([r[~r["time"].isin(hard)], r2]).sort_values("time", ignore_index=True)
     r["hour"] = (r["time"] - t0) / 3600.0
     c = f"cap_{configs[0].label}"
     gap = 1 - r[c].sum() / r[f"{c}_bound"].sum()
@@ -168,7 +180,7 @@ def plot_tech(days):
             ax.loglog(RATES, cap, ls=ls, marker=mk, ms=4, color=COLORS[d],
                       label=f"{DAYS[d][2]}, $K={k}$")
     for v, lab in ((CABLE_ONE, "one cable (250 Tbit/s)"),
-                   (CABLE_ALL, "all trans-Atlantic cables (≈1.2 Pbit/s)")):
+                   (CABLE_ALL, "all trans-Atlantic cables (>1 Pbit/s)")):
         ax.axhline(v, color="k", lw=0.6, ls=":")
         ax.text(2.9e9, v * 1.15, lab, fontsize=6)
     ax.axvspan(9e8, 2.6e9, color="0.85")
