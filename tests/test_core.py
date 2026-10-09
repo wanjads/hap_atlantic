@@ -83,15 +83,59 @@ def test_pipeline_on_synthetic_traffic():
     assert flow.widest_path_heuristic(G)[0] <= flow.max_flow_unconstrained(G)[0] + 1e-6
 
 
-def test_normalise_rest_columns():
-    from hap_atlantic.traffic import normalise
+def test_capacity_certified_and_milp():
+    G = nx.Graph()
+    G.add_node(SRC, kind="endpoint", terminals=np.inf)
+    G.add_node(DST, kind="endpoint", terminals=np.inf)
+    for gs in ("gsS0", "gsD0"):
+        G.add_node(gs, kind="ground", terminals=2)
+    for v in "abcde":
+        G.add_node(v, kind="aircraft", terminals=2)
+    G.add_edge(SRC, "gsS0", kind="fiber", cap=np.inf, delay=0.0)
+    G.add_edge(DST, "gsD0", kind="fiber", cap=np.inf, delay=0.0)
+    for u, v in [("gsS0", "a"), ("gsS0", "b"), ("c", "gsD0"), ("d", "gsD0")]:
+        G.add_edge(u, v, kind="ground", cap=10.0, delay=1.0)
+    for u, v in [("a", "c"), ("b", "d"), ("a", "d"), ("b", "c"), ("a", "e")]:
+        G.add_edge(u, v, kind="air", cap=10.0, delay=1.0)
+    r = flow.capacity(G, r_max=10.0)
+    assert r["value"] == pytest.approx(20.0) and r["bound"] >= r["value"] - 1e-9
+    assert flow.milp_max_flow(G, scale=1.0)["value"] == pytest.approx(20.0)
+    assert "e" not in flow.prune(G)  # dead end
 
-    df = pd.DataFrame({"icao24": ["ABC123"], "time": [100], "time_position": [98],
-                       "latitude": [50.0], "longitude": [-20.0], "geo_altitude": [None],
-                       "baro_altitude": [11000.0], "on_ground": [False]})
-    out = normalise(df)
-    assert out.iloc[0].to_dict() == {"time": 98.0, "icao24": "abc123", "lat": 50.0,
-                                     "lon": -20.0, "alt": 11000.0}
+
+def test_with_tech_scales_and_caps():
+    from hap_atlantic.topology import with_tech
+
+    G = _toy_graph()
+    for _, _, d in G.edges(data=True):
+        d["rate"] = np.inf if d["kind"] == "fiber" else 50.0
+    H = with_tech(G, r_max=100.0, k=4, p_scale=3.0)
+    assert H["a"]["c"]["cap"] == 100.0 and H.nodes["a"]["terminals"] == 4
+    assert with_tech(G, r_max=100.0, k=2)["a"]["c"]["cap"] == 50.0
+
+
+def test_select_fleet():
+    from hap_atlantic.traffic import select_fleet
+
+    df = pd.DataFrame({"icao24": list("abcd"), "type": ["B77W", "GLF6", "A20N", "C17"],
+                       "military": [False, False, False, True], "time": 0.0})
+    assert list(select_fleet(df, True, 1.0, 0)["icao24"]) == ["a", "c"]
+    assert len(select_fleet(df, False, 1.0, 0)) == 4
+    assert len(select_fleet(df, False, 0.0, 0)) == 0
+
+
+def test_latent_field_statistics():
+    from hap_atlantic.weather import LatentField
+
+    z = LatentField(50e3, 3600.0, 2048, seed=3)
+    rng = np.random.default_rng(0)
+    x = rng.uniform(-5e6, 5e6, (4000, 3))
+    v = z(x, 0.0)
+    assert abs(v.mean()) < 0.1 and abs(v.std() - 1) < 0.1
+    # strongly correlated at 5 km, nearly independent at 200 km
+    near = z(x + [5e3, 0, 0], 0.0)
+    far = z(x + [200e3, 0, 0], 0.0)
+    assert np.corrcoef(v, near)[0, 1] > 0.9 and abs(np.corrcoef(v, far)[0, 1]) < 0.15
 
 
 def test_adsblol_parse_trace():

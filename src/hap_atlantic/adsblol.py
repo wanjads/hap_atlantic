@@ -8,7 +8,9 @@ Each release is a tar file with one gzip-compressed readsb trace per aircraft
 
 relative to the top-level `timestamp` (README-json.md of wiedehopf/readsb). Positions keep
 the plain ICAO address so that flights crossing midnight join up across daily files;
-landings are not bridged because `interpolate_to_grid` rejects implausible ground speeds.
+the "new leg" flag (bit 2) is not used, because `interpolate_to_grid` already refuses to
+bridge landings (implausible ground speed). The aircraft database fields of each trace
+(`t` = ICAO type designator, `dbFlags` bit 0 = military) are kept in a separate table.
 """
 
 from __future__ import annotations
@@ -48,9 +50,18 @@ def parse_trace(data: dict, bbox, min_dt: float) -> pd.DataFrame | None:
     return pd.DataFrame(rows, columns=["time", "icao24", "lat", "lon", "alt"])
 
 
+def aircraft_info(data: dict) -> tuple[str, str, bool]:
+    """(icao24, ICAO type designator, military flag) from the trace header."""
+    return (str(data["icao"]).lower(), str(data.get("t") or ""),
+            bool(int(data.get("dbFlags") or 0) & 1))
+
+
 def read_archive(path: str | Path, bbox, min_dt: float = 30.0, progress: bool = True):
-    """All airborne positions inside bbox from one adsb.lol tar archive."""
-    frames, n = [], 0
+    """All airborne positions inside bbox from one adsb.lol tar archive.
+
+    Returns (positions, aircraft) with aircraft = [icao24, type, military].
+    """
+    frames, info, n = [], [], 0
     with tarfile.open(path) as tar:
         for member in tar:
             if not (member.isfile() and "trace_full_" in member.name):
@@ -58,10 +69,13 @@ def read_archive(path: str | Path, bbox, min_dt: float = 30.0, progress: bool = 
             raw = tar.extractfile(member).read()
             if raw[:2] == b"\x1f\x8b":
                 raw = gzip.decompress(raw)
-            df = parse_trace(json.loads(raw), bbox, min_dt)
+            data = json.loads(raw)
+            df = parse_trace(data, bbox, min_dt)
             if df is not None:
                 frames.append(df)
+                info.append(aircraft_info(data))
             n += 1
             if progress and n % 20000 == 0:
                 print(f"  {n} traces read, {len(frames)} in the area", flush=True)
-    return pd.concat(frames, ignore_index=True)
+    aircraft = pd.DataFrame(info, columns=["icao24", "type", "military"])
+    return pd.concat(frames, ignore_index=True), aircraft.drop_duplicates("icao24")

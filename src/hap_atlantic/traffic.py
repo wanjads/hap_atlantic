@@ -1,13 +1,15 @@
-"""Air traffic: loading OpenSky state vectors, closing oceanic coverage gaps, snapshots.
+"""Air traffic: loading position reports, closing oceanic coverage gaps, snapshots.
 
 Canonical state-vector table (one row per aircraft and time):
 
     time [s, UNIX], icao24 [str], lat [deg], lon [deg], alt [m], interpolated [bool]
+    (+ type [ICAO designator], military [bool] when an aircraft table is available)
 
 Terrestrial ADS-B receivers do not cover the central North Atlantic. Positions inside a
 coverage gap are reconstructed along the great circle between the last position before
-and the first position after the gap; this matches the organised oceanic tracks to within
-a few tens of km, which is small compared with the link ranges considered.
+and the first position after the gap, at constant speed and linearly varying altitude.
+The organised oceanic tracks follow the jet stream and can deviate from the great circle;
+this reconstruction error is not quantified here.
 """
 
 from __future__ import annotations
@@ -20,6 +22,49 @@ import pandas as pd
 from .geometry import great_circle, slerp_latlon
 
 COLUMNS = ["time", "icao24", "lat", "lon", "alt"]
+
+
+# ICAO type designators of jet airliners (passenger and cargo, narrow-body, wide-body and
+# regional jets). Business jets, turboprops, general aviation and military types are not
+# considered as relay candidates.
+AIRLINER_TYPES = frozenset("""
+    A306 A30B A310 A318 A319 A320 A321 A19N A20N A21N A332 A333 A337 A338 A339 A342 A343
+    A345 A346 A359 A35K A388 BCS1 BCS3
+    B712 B732 B733 B734 B735 B736 B737 B738 B739 B37M B38M B39M B3XM B741 B742 B743 B744
+    B748 B74S B752 B753 B762 B763 B764 B772 B773 B77L B77W B778 B779 B788 B789 B78X
+    MD11 MD82 MD83 MD87 MD88 MD90 DC10
+    E135 E145 E45X E170 E75L E75S E190 E195 E290 E295 CRJ2 CRJ7 CRJ9 CRJX F100 J328
+""".split())
+
+
+def select_fleet(states: pd.DataFrame, airliners_only: bool, equipage: float,
+                 seed: int) -> pd.DataFrame:
+    """Aircraft that carry terminals: jet airliners, of which a random share `equipage`."""
+    if airliners_only and "type" in states.columns:
+        ok = states["type"].isin(AIRLINER_TYPES)
+        if "military" in states.columns:
+            ok &= ~states["military"].astype(bool)
+        states = states[ok]
+    if equipage < 1.0:
+        ids = np.sort(states["icao24"].unique())
+        rng = np.random.default_rng([seed, 7])
+        keep = ids[rng.random(len(ids)) < equipage]
+        states = states[states["icao24"].isin(keep)]
+    return states
+
+
+def aircraft_table(positions_file: str | Path) -> Path:
+    """Path of the aircraft table ([icao24, type, military]) that belongs to a raw file."""
+    p = Path(positions_file)
+    return p.with_name(f"{p.stem}_aircraft.parquet")
+
+
+def load_aircraft(paths) -> pd.DataFrame | None:
+    """Aircraft tables next to the given raw files (None if there are none)."""
+    frames = [pd.read_parquet(aircraft_table(p)) for p in paths if aircraft_table(p).exists()]
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True).drop_duplicates("icao24", keep="last")
 
 
 def load_states(paths) -> pd.DataFrame:
@@ -38,35 +83,11 @@ def load_states(paths) -> pd.DataFrame:
 
 
 def normalise(df: pd.DataFrame) -> pd.DataFrame:
-    """Map OpenSky REST / Trino column names to the canonical schema."""
-    rename = {
-        "latitude": "lat",
-        "longitude": "lon",
-        "geo_altitude": "alt",
-        "geoaltitude": "alt",
-        "time_position": "time_pos",
-        "timestamp": "time",
-    }
-    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-    if "alt" not in df.columns:
-        for c in ("baro_altitude", "baroaltitude"):
-            if c in df.columns:
-                df = df.rename(columns={c: "alt"})
-                break
-    elif "baro_altitude" in df.columns or "baroaltitude" in df.columns:
-        baro = df["baro_altitude"] if "baro_altitude" in df.columns else df["baroaltitude"]
-        df["alt"] = df["alt"].fillna(baro)
-    if "time_pos" in df.columns:  # REST: prefer the time of the last position update
-        df["time"] = df["time_pos"].fillna(df["time"])
-    if "onground" in df.columns:
-        df = df.rename(columns={"onground": "on_ground"})
-    if "on_ground" in df.columns:
-        df = df[~df["on_ground"].astype(bool)]
+    """Canonical columns and dtypes; drops rows with missing values."""
     if pd.api.types.is_datetime64_any_dtype(df["time"]):  # unit-safe (pandas 3 uses us)
         t = pd.to_datetime(df["time"], utc=True)
-        df["time"] = (t - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(seconds=1)
-    df = df.dropna(subset=COLUMNS)
-    out = df[COLUMNS].copy()
+        df = df.assign(time=(t - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(seconds=1))
+    out = df.dropna(subset=COLUMNS)[COLUMNS].copy()
     out["icao24"] = out["icao24"].astype(str).str.strip().str.lower()
     out["time"] = out["time"].astype(float)
     return out

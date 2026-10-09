@@ -101,3 +101,9 @@ def corridor_distance(lat, lon, lat_a, lon_a, lat_b, lon_b, radius: float) -> np
     to_end = np.minimum(great_circle(lat, lon, lat_a, lon_a, radius),
                         great_circle(lat, lon, lat_b, lon_b, radius))
     return np.where(inside, cross, to_end)
+
+
+def to_latlon(xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Geocentric latitude and longitude [deg] of Cartesian points (..., 3)."""
+    x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
+    return np.degrees(np.arctan2(z, np.hypot(x, y))), np.degrees(np.arctan2(y, x))

@@ -1,99 +1,143 @@
-"""Time-stepped simulation: one candidate graph and one set of metrics per snapshot."""
+"""Time-stepped simulation: one candidate graph and one set of metrics per snapshot.
+
+Per snapshot the candidate graph is built once (uncapped link-budget rates, clouds
+applied) and then evaluated for several technology configurations (r_max, transmit-power
+scale, terminals per aircraft K) with `topology.with_tech`. Three capacities are reported:
+
+* ocean     the oceanic section alone: aircraft east of 15 W inject, west of 55 W extract
+* backbone  Frankfurt -> New York with unlimited terminals at the ground stations
+* e2e       Frankfurt -> New York with the configured ground stations
+"""
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+
+import networkx as nx
 import numpy as np
 import pandas as pd
 
 from . import flow
-from .config import Params
-from .topology import DST, SRC, CloudProcess, build_graph, ground_stations
-from .traffic import snapshots
-from .weather import WeatherProcess
+from .config import TECHS, Params
+from .topology import DST, SRC, build_graph, with_tech
+from .traffic import select_fleet
+from .weather import CloudField
+
+OCEAN_LON_EAST, OCEAN_LON_WEST = -15.0, -55.0  # Shanwick / Gander oceanic boundaries
+METRICS = ("ocean", "backbone", "e2e")
+
+
+@dataclass(frozen=True)
+class Config:
+    """Technology configuration evaluated on a candidate graph."""
+
+    label: str
+    r_max: float
+    p_scale: float  # transmit power relative to the one the graph was built with
+    k: int
+
+
+def tech_config(name: str, k: int, p: Params) -> Config:
+    t = TECHS[name]
+    return Config(f"{name}_k{k}", t.r_max, t.p_tx / p.terminal.p_tx, k)
+
+
+def ocean_graph(G: nx.Graph, r_access: float, lon_east: float = OCEAN_LON_EAST,
+                lon_west: float = OCEAN_LON_WEST) -> nx.Graph:
+    """Graph for the oceanic capacity.
+
+    Every aircraft east of lon_east may inject traffic and every aircraft west of lon_west
+    may extract it; such an access link costs one terminal and carries r_access, as if it
+    came from a continental neighbour. Links between two aircraft on the same side are
+    dropped: a direct access link dominates them.
+    """
+    side = {v: (1 if d["lon"] > lon_east else -1 if d["lon"] < lon_west else 0)
+            for v, d in G.nodes(data=True) if d.get("kind") == "aircraft"}
+    H = nx.Graph()
+    H.add_node(SRC, kind="endpoint", terminals=np.inf)
+    H.add_node(DST, kind="endpoint", terminals=np.inf)
+    for u, v, d in G.edges(data=True):
+        if d["kind"] != "air" or (side[u] != 0 and side[u] == side[v]):
+            continue
+        H.add_edge(u, v, **d)
+    for v in list(H.nodes):
+        if v in (SRC, DST):
+            continue
+        H.nodes[v].update(G.nodes[v])
+        if side[v]:
+            H.add_edge(SRC if side[v] == 1 else DST, v, kind="air", rate=r_access,
+                       cap=r_access, delay=0.0)
+    return H
+
+
+def _backbone(G: nx.Graph) -> nx.Graph:
+    B = G.copy()
+    for v, kind in B.nodes(data="kind"):
+        if kind == "ground":
+            B.nodes[v]["terminals"] = np.inf
+    return B
 
 
 def _ground_links(G, endpoint) -> int:
     return sum(1 for gs in G.neighbors(endpoint) for v in G.neighbors(gs) if v != endpoint)
 
 
-def ocean_capacity(G, p: Params, lon_east: float = -15.0, lon_west: float = -55.0) -> float:
-    """Capacity of the oceanic section alone (heuristic, terminal limits respected).
-
-    Every aircraft east of lon_east may inject traffic and every aircraft west of lon_west
-    may extract it; such an access link costs one terminal and carries r_max, as if it came
-    from a continental neighbour. This isolates the oceanic bottleneck from the endpoints.
-    """
-    H = G.subgraph(v for v, k in G.nodes(data="kind") if k == "aircraft").copy()
-    H.add_node(SRC, kind="endpoint", terminals=np.inf)
-    H.add_node(DST, kind="endpoint", terminals=np.inf)
-    for v, lon in list(H.nodes(data="lon")):
-        if lon is None:
-            continue
-        end = SRC if lon > lon_east else DST if lon < lon_west else None
-        if end is not None:
-            H.add_edge(end, v, kind="air", cap=p.terminal.r_max, delay=0.0)
-    return flow.widest_path_heuristic(H)[0]
-
-
-def evaluate_snapshot(G, p: Params, run_milp: bool = False, milp_time: float = 30.0) -> dict:
+def evaluate_snapshot(G: nx.Graph, p: Params, configs, metrics=METRICS) -> dict:
     n_air = sum(1 for _, k in G.nodes(data="kind") if k == "aircraft")
-    n_links = sum(1 for *_, k in G.edges(data="kind") if k == "air")
-    ub1, cut = flow.max_flow_unconstrained(G)
-    ub2 = flow.max_flow_node_capacity(G, p.terminal.r_max)
-    heur, paths = flow.widest_path_heuristic(G)
-    # backbone capacity: same graph, but ground stations with unlimited terminals
-    B = G.copy()
-    for v, kind in B.nodes(data="kind"):
-        if kind == "ground":
-            B.nodes[v]["terminals"] = np.inf
-    backbone, _ = flow.widest_path_heuristic(B)
-    ocean = ocean_capacity(G, p)
     delay, path = flow.min_latency_path(G)
     m = {
         "n_aircraft": n_air,
-        "n_air_links": n_links,
-        "connected": bool(np.isfinite(delay)),
-        "flow_unconstrained": ub1,
-        "flow_relaxed": ub2,
-        "flow_heuristic": heur,
-        "flow_backbone": backbone,
-        "flow_ocean": ocean,
-        "n_paths": len(paths),
-        "min_delay": delay,
-        "min_delay_hops": max(len(path) - 1, 0),
-        "mincut_aircraft": sum(1 for v in cut if G.nodes[v].get("kind") == "aircraft"),
+        "n_air_links": sum(1 for *_, k in G.edges(data="kind") if k == "air"),
         "src_ground_links": _ground_links(G, SRC),
         "dst_ground_links": _ground_links(G, DST),
+        "src_rf_links": sum(1 for gs in G.neighbors(SRC) for _, _, md in
+                            G.edges(gs, data="medium") if md == "rf"),
+        "n_clear_sites_src": sum(1 for gs in G.neighbors(SRC) if G.nodes[gs].get("clear")),
+        "n_clear_sites_dst": sum(1 for gs in G.neighbors(DST) if G.nodes[gs].get("clear")),
+        "min_link_rate": min((d["rate"] for *_, d in G.edges(data=True)
+                              if d["kind"] != "fiber"), default=np.nan),
+        "connected": bool(np.isfinite(delay)),
+        "min_delay": delay,
+        "min_delay_hops": max(len(path) - 1, 0),
     }
-    if run_milp:
-        r = flow.milp_max_flow(G, time_limit=milp_time)
-        m["flow_milp"], m["flow_milp_bound"] = r["value"], r["bound"]
+    for c in configs:
+        H = with_tech(G, c.r_max, c.k, c.p_scale)
+        graphs = {"ocean": lambda H=H, c=c: ocean_graph(H, c.r_max),
+                  "backbone": lambda H=H: _backbone(H), "e2e": lambda H=H: H}
+        for name in metrics:
+            r = flow.capacity(graphs[name](), c.r_max)
+            m[f"{name}_{c.label}"] = r["value"]
+            m[f"{name}_{c.label}_heur"] = r["heuristic"]
+            m[f"{name}_{c.label}_bound"] = r["bound"]
     return m
 
 
-def run(grid_states: pd.DataFrame, p: Params, run_milp: bool = False,
-        progress: bool = True, every: int = 1) -> pd.DataFrame:
-    rng = np.random.default_rng(p.seed)
-    stations = ground_stations(p)
-    if p.ground.weather == "era5":
-        wx = WeatherProcess(stations, grid_states["time"].min(), grid_states["time"].max(),
-                            p.ground.f_cirrus, p.ground.rf_rain_max, rng)
-    else:
-        clouds = CloudProcess(len(stations), p.ground.p_cloud_free, p.ground.cloud_corr_time,
-                              p.dt, rng)
+def _chunk(args):
+    snaps, p, configs, metrics, t_range = args
+    clouds = (CloudField(*t_range, p.clouds, p.seed, p.geometry.earth_radius)
+              if p.clouds.model == "era5" else None)
     rows = []
-    for k, (t, snap) in enumerate(snapshots(grid_states)):
-        if p.ground.weather == "era5":
-            clear, rf_ok = wx.state(t)
-        else:
-            clear, rf_ok = clouds.step(), np.ones(len(stations), dtype=bool)
-        if k % every:
-            continue
-        G = build_graph(snap, p, clear, rf_ok)
-        rows.append({"time": t, "n_clear_sites_src": int(clear[: p.ground.n_sites].sum()),
-                     "n_clear_sites_dst": int(clear[p.ground.n_sites:].sum()),
-                     **evaluate_snapshot(G, p, run_milp)})
-        if progress and len(rows) % 50 == 0:
-            print(f"  {len(rows)} snapshots, t={t:.0f}, heur={rows[-1]['flow_heuristic']/1e9:.1f}"
-                  " Gbit/s", flush=True)
-    return pd.DataFrame(rows)
+    for t, snap in snaps:
+        G = build_graph(snap, p, clouds.at(t) if clouds is not None else None)
+        rows.append({"time": t, **evaluate_snapshot(G, p, configs, metrics)})
+    return rows
+
+
+def run(states: pd.DataFrame, p: Params, configs, t0: float, t1: float, every: int = 10,
+        metrics=METRICS, workers: int = 1) -> pd.DataFrame:
+    """Evaluate every `every`-th grid time step in [t0, t1)."""
+    states = select_fleet(states, p.airliners_only, p.equipage, p.seed)
+    times = np.sort(states["time"].unique())
+    times = times[(times >= t0) & (times < t1)][::every]
+    by_t = {t: g for t, g in states[states["time"].isin(times)].groupby("time")}
+    snaps = [(t, by_t.get(t, states.iloc[:0])) for t in times]
+    t_range = (t0 - 3600.0, t1 + 3600.0)  # weather window (whole days are fetched)
+    n = max(1, min(workers, len(snaps)))
+    chunks = [(snaps[i::n], p, configs, metrics, t_range) for i in range(n)]
+    if n == 1:
+        rows = _chunk(chunks[0])
+    else:
+        with ProcessPoolExecutor(n) as ex:
+            rows = [r for part in ex.map(_chunk, chunks) for r in part]
+    return pd.DataFrame(rows).sort_values("time", ignore_index=True)

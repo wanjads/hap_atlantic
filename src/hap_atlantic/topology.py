@@ -6,8 +6,10 @@ Nodes
     <icao24>              aircraft
 Edges (undirected, full-duplex; attribute `cap` per direction)
     kind="fiber"   endpoint <-> ground station, unlimited capacity, no terminal used
-    kind="ground"  ground station <-> aircraft
+    kind="ground"  ground station <-> aircraft (medium "optical" or "rf")
     kind="air"     aircraft <-> aircraft
+`rate` is the uncapped link-budget rate at the configured transmit power, `cap` is
+min(rate, r_max). `with_tech` re-caps a graph for another technology tier.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from scipy.spatial import cKDTree
 from . import geometry as geo
 from .config import C0, N_AIR, N_FIBER, Params, Site
 from .link import link_rate
+from .weather import CloudState
 
 SRC, DST = "SRC", "DST"
 
@@ -54,26 +57,6 @@ def ground_stations(p: Params) -> list[GroundStation]:
     return out
 
 
-class CloudProcess:
-    """Two-state Markov chain per ground station: cloud-free line of sight or blocked."""
-
-    def __init__(self, n: int, p_clear: float, corr_time: float, dt: float, rng):
-        self.rng = rng
-        # transition probabilities with stationary P(clear) = p_clear and
-        # mean sojourn ~ corr_time in the rarer state
-        mean_clear = corr_time * max(p_clear / (1 - p_clear), 1.0) if p_clear < 1 else np.inf
-        mean_cloud = corr_time * max((1 - p_clear) / max(p_clear, 1e-9), 1.0)
-        self.p_leave_clear = 0.0 if np.isinf(mean_clear) else min(dt / mean_clear, 1.0)
-        self.p_leave_cloud = min(dt / mean_cloud, 1.0)
-        self.state = rng.random(n) < p_clear
-
-    def step(self) -> np.ndarray:
-        u = self.rng.random(self.state.size)
-        leave = np.where(self.state, u < self.p_leave_clear, u < self.p_leave_cloud)
-        self.state = np.where(leave, ~self.state, self.state)
-        return self.state.copy()
-
-
 def yao_sparsify(pairs: np.ndarray, d: np.ndarray, lat, lon, cones: int) -> np.ndarray:
     """Mask of pairs that are the nearest or farthest neighbour of either end in some cone.
 
@@ -93,12 +76,11 @@ def yao_sparsify(pairs: np.ndarray, d: np.ndarray, lat, lon, cones: int) -> np.n
     return keep
 
 
-def build_graph(snap: pd.DataFrame, p: Params, clear: np.ndarray | None = None,
-                rf_ok: np.ndarray | None = None) -> nx.Graph:
+def build_graph(snap: pd.DataFrame, p: Params, clouds: CloudState | None = None) -> nx.Graph:
     """Candidate graph for one snapshot (aircraft positions in `snap`).
 
-    clear[i]: optical line of sight of ground station i is cloud-free.
-    rf_ok[i]: RF fallback of station i is usable (no heavy rain); only if p.ground.rf_rate > 0.
+    clouds: cloud state at the snapshot time (None = clear sky). Cloud-blocked air-to-air
+    rays are removed before the Yao sparsification, so that clear alternatives survive.
     """
     g_par, term, atm = p.geometry, p.terminal, p.atmosphere
     r_eff = g_par.earth_radius * g_par.k_refraction
@@ -123,31 +105,30 @@ def build_graph(snap: pd.DataFrame, p: Params, clear: np.ndarray | None = None,
         if len(pairs):
             a, b = pos[pairs[:, 0]], pos[pairs[:, 1]]
             ok = geo.chord_min_height(a, b, r_eff) >= g_par.h_chord_min
+            if clouds is not None:
+                ok[ok] = clouds.air_clear(a[ok], b[ok])
             pairs, a, b = pairs[ok], a[ok], b[ok]
             d = np.linalg.norm(b - a, axis=-1)
             if g_par.yao_cones:
                 keep = yao_sparsify(pairs, d, snap["lat"].to_numpy(), snap["lon"].to_numpy(),
                                     g_par.yao_cones)
                 pairs, a, b, d = pairs[keep], a[keep], b[keep], d[keep]
-            rate = link_rate(d, geo.chord_heights(a, b, r_eff, g_par.ray_samples), term, atm)
+            rate = link_rate(d, geo.chord_heights(a, b, r_eff, g_par.ray_samples), term, atm,
+                             capped=False)
             for (i, j), dist, r in zip(pairs, d, rate, strict=True):
                 if r > 0:
-                    G.add_edge(ids[i], ids[j], kind="air", cap=float(r), dist=float(dist),
+                    G.add_edge(ids[i], ids[j], kind="air", rate=float(r),
+                               cap=float(min(r, term.r_max)), dist=float(dist),
                                delay=float(dist * N_AIR / C0 + term.hop_delay))
 
     # --- ground stations ------------------------------------------------------------------
-    stations = ground_stations(p)
-    if clear is None:
-        clear = np.ones(len(stations), dtype=bool)
-    if rf_ok is None:
-        rf_ok = np.ones(len(stations), dtype=bool)
-    for gs, is_clear, is_rf in zip(stations, clear, rf_ok, strict=True):
+    for gs in ground_stations(p):
+        zenith = True if clouds is None else clouds.zenith_clear(gs.site.lat, gs.site.lon)
         G.add_node(gs.name, kind="ground", terminals=p.ground.terminals_per_site,
-                   lat=gs.site.lat, lon=gs.site.lon, alt=gs.site.alt, clear=bool(is_clear))
-        G.add_edge(gs.endpoint, gs.name, kind="fiber", cap=np.inf, dist=0.0,
+                   lat=gs.site.lat, lon=gs.site.lon, alt=gs.site.alt, clear=zenith)
+        G.add_edge(gs.endpoint, gs.name, kind="fiber", rate=np.inf, cap=np.inf, dist=0.0,
                    delay=gs.fiber_delay)
-        use_rf = not is_clear and is_rf and p.ground.rf_rate > 0
-        if not (is_clear or use_rf) or len(ids) == 0:
+        if len(ids) == 0:
             continue
         gpos = geo.to_ecef(gs.site.lat, gs.site.lon, gs.site.alt, r_eff)
         el = geo.elevation_deg(np.broadcast_to(gpos, pos.shape), pos)
@@ -156,25 +137,36 @@ def build_graph(snap: pd.DataFrame, p: Params, clear: np.ndarray | None = None,
             continue
         a = np.broadcast_to(gpos, (sel.size, 3))
         d = np.linalg.norm(pos[sel] - a, axis=-1)
-        if use_rf:
-            rate = np.full(sel.size, p.ground.rf_rate)
-        else:
-            rate = link_rate(d, geo.chord_heights(a, pos[sel], r_eff, g_par.ray_samples), term,
-                             atm)
-        for k, dist, r in zip(sel, d, rate, strict=True):
-            if r > 0:
-                G.add_edge(gs.name, ids[k], kind="ground", medium="rf" if use_rf else "optical",
-                           cap=float(r), dist=float(dist),
-                           delay=float(dist * N_AIR / C0 + term.hop_delay))
+        rate = link_rate(d, geo.chord_heights(a, pos[sel], r_eff, g_par.ray_samples), term, atm,
+                         capped=False)
+        clear = np.ones(sel.size, dtype=bool) if clouds is None else clouds.ground_clear(
+            gpos, pos[sel])
+        rf = p.ground.rf_rate > 0 and (clouds is None or clouds.rain_ok(
+            gs.site.lat, gs.site.lon, p.ground.rf_rain_max))
+        for k, dist, r, ok in zip(sel, d, rate, clear, strict=True):
+            if ok and r > 0:
+                medium, r = "optical", float(r)
+            elif rf:
+                medium, r = "rf", p.ground.rf_rate
+            else:
+                continue
+            G.add_edge(gs.name, ids[k], kind="ground", medium=medium, rate=r,
+                       cap=min(r, term.r_max), dist=float(dist),
+                       delay=float(dist * N_AIR / C0 + term.hop_delay))
     return G
 
 
-def fiber_reference_delay(p: Params) -> dict[str, float]:
-    """One-way reference delays [s] between the endpoints."""
-    gc = float(geo.great_circle(p.source.lat, p.source.lon, p.sink.lat, p.sink.lon,
-                                p.geometry.earth_radius))
-    return {
-        "great_circle_km": gc / 1e3,
-        "vacuum_great_circle": gc / C0,
-        "fiber_great_circle": gc * N_FIBER / C0,  # lower bound for any fibre route
-    }
+def with_tech(G: nx.Graph, r_max: float, k: int, p_scale: float = 1.0) -> nx.Graph:
+    """Copy of G for another technology tier: optical rates scaled by p_scale (transmit
+    power ratio; the budget is linear in P_tx), capped at r_max; k terminals per aircraft."""
+    H = G.copy()
+    for _, _, d in H.edges(data=True):
+        if d["kind"] == "fiber":
+            continue
+        rate = d["rate"] * (p_scale if d.get("medium", "optical") == "optical" else 1.0)
+        d["cap"] = min(rate, r_max)
+    for _, d in H.nodes(data=True):
+        if d["kind"] == "aircraft":
+            d["terminals"] = k
+    return H
+

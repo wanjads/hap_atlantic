@@ -5,8 +5,13 @@ active at the same time (degree constraint). Methods, from loosest to tightest:
 
 * `max_flow_unconstrained`  ignores the terminal limit (upper bound 1)
 * `max_flow_node_capacity`  relaxes it to a relay capacity of K/2 * r_max per node (bound 2)
-* `milp_max_flow`           exact terminal assignment + routing (MILP, small instances)
+* `milp_max_flow`           exact terminal assignment + routing (MILP)
 * `widest_path_heuristic`   successive widest paths with terminal bookkeeping (scalable)
+
+`capacity` is what the evaluation reports: the heuristic value if it already meets bound 2
+(then it is optimal), otherwise the MILP on the graph pruned to nodes that lie on some
+SRC-DST path. The bounds refer to the candidate graph they are given; on a Yao-sparsified
+graph they bound the sparsified problem only.
 """
 
 from __future__ import annotations
@@ -87,6 +92,37 @@ def min_latency_path(G: nx.Graph, min_rate: float = 1e9) -> tuple[float, list]:
     except nx.NetworkXNoPath:
         return np.inf, []
     return float(delay), path
+
+
+def prune(G: nx.Graph) -> nx.Graph:
+    """Subgraph of the nodes that lie on at least one simple SRC-DST path.
+
+    With a virtual SRC-DST edge these are exactly the nodes of the biconnected component
+    that contains it.
+    """
+    H = nx.Graph(G.edges)
+    H.add_edge(SRC, DST)
+    for comp in nx.biconnected_components(H):
+        if SRC in comp and DST in comp:
+            return G.subgraph(comp).copy()
+    return G.subgraph([SRC, DST]).copy()
+
+
+def capacity(G: nx.Graph, r_max: float, time_limit: float = 60.0) -> dict:
+    """Max SRC-DST flow under the terminal constraint (see module docstring).
+
+    Returns value, upper bound, heuristic value and the method that produced the value.
+    """
+    if not (G.has_node(SRC) and G.has_node(DST)) or not nx.has_path(G, SRC, DST):
+        return {"value": 0.0, "bound": 0.0, "heuristic": 0.0, "method": "no path"}
+    heur, _ = widest_path_heuristic(G)
+    bound = max_flow_node_capacity(G, r_max)
+    if heur >= bound * (1 - 1e-6):
+        return {"value": heur, "bound": bound, "heuristic": heur, "method": "heuristic"}
+    r = milp_max_flow(prune(G), time_limit=time_limit)
+    value = max(r["value"], heur)
+    ub = min(bound, r["bound"]) if np.isfinite(r["bound"]) else bound
+    return {"value": value, "bound": ub, "heuristic": heur, "method": "milp"}
 
 
 # ----------------------------------------------------------------------------------------

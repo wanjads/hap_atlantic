@@ -25,6 +25,10 @@ class Site:
 
 # Endpoints. Frankfurt: Eurex / DE-CIX area; New York: Equinix NY4 (Secaucus, NJ),
 # the usual reference point for transatlantic low-latency trading routes.
+# Area from which positions are read (lat_min, lat_max, lon_min, lon_max): covers
+# Frankfurt, New York and the oceanic tracks.
+NORTH_ATLANTIC_BBOX = (35.0, 66.0, -80.0, 15.0)
+
 FRANKFURT = Site("Frankfurt", 50.1109, 8.6821, 110.0)
 NEW_YORK = Site("New York (NY4 Secaucus)", 40.7769, -74.0699, 10.0)
 
@@ -42,7 +46,7 @@ class TerminalParams:
     photons_per_bit: float = 20.0  # receiver sensitivity (coherent, incl. FEC) [photons/bit]
     r_max: float = 100e9  # transceiver line-rate limit per link [bit/s]
     outage_prob: float = 1e-3  # target outage probability for the turbulence fade margin
-    hop_delay: float = 1e-6  # per-hop processing / OEO delay [s]
+    hop_delay: float = 10e-6  # per-hop processing delay (coherent DSP + FEC + switch) [s]
 
 
 @dataclass(frozen=True)
@@ -65,13 +69,30 @@ class GroundParams:
     n_sites: int = 1  # number of ground stations per endpoint
     ring_radius: float = 50e3  # sites are placed on a ring of this radius [m]
     terminals_per_site: int = 4
-    weather: str = "era5"  # "era5" (hourly reanalysis at the sites) or "markov" (synthetic)
-    f_cirrus: float = 1.0  # fraction of high (cirrus) cloud cover that blocks the beam [-]
-    p_cloud_free: float = 0.35  # markov only: stationary P(cloud-free line of sight) [-]
-    cloud_corr_time: float = 3 * 3600.0  # markov only: mean duration of a cloud state [s]
     rf_rate: float = 0.0  # RF fallback rate per ground link when cloudy, 0 = optical only [bit/s]
     rf_rain_max: float = 5.0  # RF ground links fail above this rain rate [mm/h]
     fiber_detour: float = 1.3  # terrestrial fibre route length / great-circle distance [-]
+
+
+@dataclass(frozen=True)
+class CloudParams:
+    """Cloud blockage of optical links, driven by hourly ERA5 cloud cover (see weather.py).
+
+    A point in a cloud layer is cloudy if Phi(Z) < c, where c is the ERA5 cover of that
+    layer (high layer: f_cirrus * c) and Z a standard Gaussian space-time field with
+    correlation length l_corr and correlation time t_corr. Air-to-air rays (>= h_chord_min)
+    only cross the high layer; ground links cross all three layers.
+    """
+
+    model: str = "clear"  # "clear" (no clouds) or "era5"
+    f_cirrus: float = 0.5  # fraction of high (cirrus) cloud that blocks the beam [-]
+    l_corr: float = 50e3  # horizontal correlation length of the latent field [m]
+    t_corr: float = 3600.0  # correlation time of the latent field [s] (~ l_corr / wind)
+    layer_heights: tuple = (1_000.0, 4_000.0, 8_000.0)  # low / mid / high crossing height [m]
+    grid_step: float = 1.0  # spacing of the ERA5 sampling grid [deg]
+    mask_step: float = 0.2  # resolution of the cirrus mask for air-to-air rays [deg]
+    n_features: int = 512  # random Fourier features of the latent field
+    ray_samples: int = 24  # cloud test points per air-to-air ray
 
 
 @dataclass(frozen=True)
@@ -87,33 +108,43 @@ class Params:
     terminal: TerminalParams = field(default_factory=TerminalParams)
     geometry: GeometryParams = field(default_factory=GeometryParams)
     ground: GroundParams = field(default_factory=GroundParams)
+    clouds: CloudParams = field(default_factory=CloudParams)
     atmosphere: AtmosphereParams = field(default_factory=AtmosphereParams)
     terminals_per_aircraft: int = 2
+    airliners_only: bool = True  # only jet airliners (ICAO type list in traffic.py) are nodes
+    equipage: float = 1.0  # fraction of those airliners that carry terminals [-]
     source: Site = FRANKFURT
     sink: Site = NEW_YORK
     dt: float = 60.0  # simulation time step [s]
     seed: int = 0
 
 
-def scenario(name: str) -> Params:
-    """Named technology scenarios used in the evaluation."""
+@dataclass(frozen=True)
+class Tech:
+    """Terminal technology tier: line rate per link and the transmit power it needs."""
+
+    r_max: float  # [bit/s]
+    p_tx: float  # [W]
+    note: str
+
+
+# Airborne optical links have been demonstrated at 1-2.6 Gbit/s (Moll2015, FALCON2010,
+# GAASI2022, ESA2026); everything above is an extrapolation from space / ground systems.
+TECHS = {
+    "demo": Tech(2.5e9, 1.0, "demonstrated airborne rate"),
+    "leo": Tech(100e9, 1.0, "LEO laser crosslink class (Starlink2024)"),
+    "dwdm": Tech(1e12, 5.0, "DWDM terminal, 10 x 100 Gbit/s (extrapolation)"),
+    "visionary": Tech(10e12, 10.0, "ground-demo DWDM class (DLR2018), static link only"),
+}
+K_VALUES = (2, 4, 6)  # terminals per aircraft
+SCENARIOS = tuple(TECHS)
+
+
+def scenario(name: str, k: int = 2) -> Params:
+    """Params for a technology tier with k terminals per aircraft."""
+    if name not in TECHS:
+        raise ValueError(f"unknown scenario {name!r}")
     base = Params()
-    if name == "conservative":  # today's LEO laser terminals (~100 Gbit/s)
-        return base
-    if name == "advanced":  # DWDM terminal, 1 Tbit/s, 4 gimbals
-        return replace(
-            base,
-            terminals_per_aircraft=4,
-            terminal=replace(base.terminal, r_max=1e12, p_tx=5.0),
-        )
-    if name == "visionary":  # ground-demo class DWDM (>10 Tbit/s), 6 gimbals
-        return replace(
-            base,
-            terminals_per_aircraft=6,
-            terminal=replace(base.terminal, r_max=10e12, p_tx=10.0),
-            ground=replace(base.ground, n_sites=5),
-        )
-    raise ValueError(f"unknown scenario {name!r}")
-
-
-SCENARIOS = ("conservative", "advanced", "visionary")
+    t = TECHS[name]
+    return replace(base, terminals_per_aircraft=k,
+                   terminal=replace(base.terminal, r_max=t.r_max, p_tx=t.p_tx))

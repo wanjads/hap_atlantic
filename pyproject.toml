@@ -18,8 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-trino = ["pyopensky"]
 dev = ["pytest", "ruff"]
+plots = ["cartopy"]
 
 [project.scripts]
 hap-atlantic = "hap_atlantic.cli:main"

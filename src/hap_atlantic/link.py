@@ -81,8 +81,13 @@ def link_rate(
     term: TerminalParams,
     atm: AtmosphereParams,
     extra_loss_db=0.0,
+    capped: bool = True,
 ) -> np.ndarray:
-    """Achievable data rate [bit/s] for links of length d with ray heights (..., n)."""
+    """Achievable data rate [bit/s] for links of length d with ray heights (..., n).
+
+    The photon-counting budget has no bandwidth limit; with capped=True the rate is
+    limited to the transceiver line rate r_max, which is binding for almost all links.
+    """
     d = np.asarray(d, dtype=float)
     beta2 = rytov_spherical(heights, d, term, atm)
     loss_db = (
@@ -94,4 +99,4 @@ def link_rate(
     p_rx = term.p_tx * term.eta_optics * geometric_gain(d, term) * 10 ** (-loss_db / 10)
     photon_energy = H_PLANCK * C0 / term.wavelength
     rate = p_rx / (term.photons_per_bit * photon_energy)
-    return np.minimum(rate, term.r_max)
+    return np.minimum(rate, term.r_max) if capped else rate
