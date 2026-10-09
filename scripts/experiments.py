@@ -25,8 +25,8 @@ import pandas as pd
 
 from hap_atlantic import flow
 from hap_atlantic.config import K_VALUES, scenario
-from hap_atlantic.simulate import ocean_graph, run, safe_workers, tech_config
-from hap_atlantic.topology import DST, SRC, build_graph, with_tech
+from hap_atlantic.simulate import run, safe_workers, tech_config
+from hap_atlantic.topology import DST, SRC, build_graph, land_graph, with_tech
 from hap_atlantic.traffic import select_fleet
 from hap_atlantic.weather import CloudField
 
@@ -168,7 +168,7 @@ def _solver_one(args):
         p = scenario("leo", k)
         p = replace(p, geometry=replace(p.geometry, yao_cones=cones))
         G = with_tech(build_graph(snap, p), p.terminal.r_max, k)
-        for metric, H in (("ocean", ocean_graph(G, p.terminal.r_max)), ("e2e", G)):
+        for metric, H in (("capacity", land_graph(G, p)), ("fra_ny", G)):
             tic = time.time()
             heur = flow.widest_path_heuristic(H)[0]
             t_heur = time.time() - tic

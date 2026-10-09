@@ -15,6 +15,7 @@ min(rate, r_max). `with_tech` re-caps a graph for another technology tier.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import networkx as nx
 import numpy as np
@@ -22,9 +23,9 @@ import pandas as pd
 from scipy.spatial import cKDTree
 
 from . import geometry as geo
-from .config import C0, N_AIR, N_FIBER, Params, Site
+from .config import C0, N_AIR, N_FIBER, NORTH_ATLANTIC_BBOX, Params, Site
 from .link import link_rate
-from .weather import CloudState
+from .weather import CloudState, land_sea_mask
 
 SRC, DST = "SRC", "DST"
 
@@ -171,3 +172,73 @@ def with_tech(G: nx.Graph, r_max: float, k: int, p_scale: float = 1.0) -> nx.Gra
             d["terminals"] = k
     return H
 
+
+
+@lru_cache(maxsize=4)
+def land_points(lon_eu: float, lon_na: float, radius: float):
+    """Land grid points (lat, lon, ECEF) of Europe and North America inside the corridor box."""
+    lat, lon, lsm = land_sea_mask()
+    lamin, lamax, lomin, lomax = NORTH_ATLANTIC_BBOX
+    glat, glon = np.meshgrid(lat, lon, indexing="ij")
+    box = (glat >= lamin) & (glat <= lamax) & (glon >= lomin) & (glon <= lomax) & (lsm >= 0.5)
+    greenland = (glat > 59.5) & (glon > -62.0)
+    out = []
+    for sel in (box & (glon >= lon_eu), box & (glon <= lon_na) & ~greenland):
+        la, lo = glat[sel], glon[sel]
+        out.append((la, lo, geo.to_ecef(la, lo, 0.0, radius)))
+    return out
+
+
+def land_graph(G: nx.Graph, p: Params, clouds: CloudState | None = None) -> nx.Graph:
+    """Capacity graph: aircraft of G with access links from ground stations everywhere on land.
+
+    SRC = all European land stations, DST = all North American land stations (unlimited
+    terminals). An aircraft gets one access link per side if a land point sees it at
+    >= elev_min_ground; of the land_candidates nearest points the best link budget (incl.
+    cloud loss) is used, else the RF fallback of the nearest point (no heavy rain).
+    """
+    g_par, term, atm = p.geometry, p.terminal, p.atmosphere
+    r_eff = g_par.earth_radius * g_par.k_refraction
+    ac = [(v, d) for v, d in G.nodes(data=True) if d.get("kind") == "aircraft"]
+    H = G.subgraph([v for v, _ in ac]).copy()
+    H.add_node(SRC, kind="endpoint", terminals=np.inf)
+    H.add_node(DST, kind="endpoint", terminals=np.inf)
+    if not ac:
+        return H
+    ids = np.array([v for v, _ in ac], dtype=object)
+    pos = geo.to_ecef(np.array([d["lat"] for _, d in ac]), np.array([d["lon"] for _, d in ac]),
+                      np.array([d["alt"] for _, d in ac]), r_eff)
+    e = np.radians(g_par.elev_min_ground)
+    h_max = max(d["alt"] for _, d in ac)
+    s_max = np.sqrt((r_eff + h_max) ** 2 - (r_eff * np.cos(e)) ** 2) - r_eff * np.sin(e)
+    sides = land_points(p.ground.land_eu_lon, p.ground.land_na_lon, g_par.earth_radius)
+    for end, (la, lo, xyz) in zip((SRC, DST), sides, strict=True):
+        if len(xyz) == 0:
+            continue
+        k = p.ground.land_candidates
+        dist, idx = cKDTree(xyz).query(pos, k=k, distance_upper_bound=s_max)
+        i_ac, i_c = np.nonzero(np.isfinite(dist))
+        if i_ac.size == 0:
+            continue
+        cell = idx[i_ac, i_c]
+        a, b = xyz[cell], pos[i_ac]
+        ok = geo.elevation_deg(a, b) >= g_par.elev_min_ground
+        i_ac, cell, a, b = i_ac[ok], cell[ok], a[ok], b[ok]
+        d = np.linalg.norm(b - a, axis=-1)
+        loss = clouds.ray_loss_db(a, b) if clouds is not None else 0.0
+        rate = link_rate(d, geo.chord_heights(a, b, r_eff, g_par.ray_samples), term, atm,
+                         extra_loss_db=loss, capped=False)
+        best = pd.DataFrame({"ac": i_ac, "rate": rate, "cell": cell, "d": d})
+        for i, grp in best.groupby("ac"):
+            r = grp["rate"].max()
+            if r >= term.r_min:
+                medium = "optical"
+            elif p.ground.rf_rate > 0 and (clouds is None or clouds.rain_ok(
+                    la[grp["cell"].iloc[grp["d"].argmin()]],
+                    lo[grp["cell"].iloc[grp["d"].argmin()]], p.ground.rf_rain_max)):
+                medium, r = "rf", p.ground.rf_rate
+            else:
+                continue
+            H.add_edge(end, ids[i], kind="ground", medium=medium, rate=float(r),
+                       cap=float(min(r, term.r_max)), dist=0.0, delay=0.0)
+    return H

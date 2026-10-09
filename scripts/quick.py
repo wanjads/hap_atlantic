@@ -1,13 +1,16 @@
 """Mini sanity-check experiments (seconds each) with figures in figures/quick/.
 
-9 July 2023, only 4 snapshots (04, 09, 14, 19 UTC), 100 Gbit/s links, K = 2, one ground
-station per endpoint, minimum elevation 5 deg, minimum air-to-air ray height 3 km.
+9 July 2023, only 4 snapshots (04, 09, 14, 19 UTC), always with ERA5 clouds, 100 Gbit/s
+links, K = 2, minimum elevation 5 deg, minimum air-to-air ray height 3 km.
 
-    python scripts/quick.py hmin      # clear sky vs. ERA5 clouds (+ RF fallback)
-    python scripts/quick.py clouds    # ERA5 clouds: RF fallback on/off, ice crystal size
-    python scripts/quick.py tech      # ERA5 clouds: rate per link x terminals per aircraft
+* capacity: ground stations everywhere on land, Europe -> North America
+* latency:  Frankfurt -> New York (NY4), one station per endpoint, RF fallback
+
+    python scripts/quick.py overview  # capacity and latency per snapshot
+    python scripts/quick.py clouds    # RF fallback on/off, ice crystal size
+    python scripts/quick.py tech      # rate per link x terminals per aircraft
     python scripts/quick.py newyork   # map: airliners around New York, elevation rings
-    python scripts/quick.py map       # map of one snapshot with cloud-blocked links
+    python scripts/quick.py map       # map of one snapshot
 """
 
 from __future__ import annotations
@@ -33,33 +36,9 @@ T0, T1 = DAY + 4 * 3600.0, DAY + 86400.0
 EVERY = 300  # minutes -> 04, 09, 14, 19 UTC
 OUT, FIG = Path("results/quick"), Path("figures/quick")
 WORKERS = 4
-ERA5 = {"model": "era5"}
 
 plt.rcParams.update({"font.size": 8, "axes.grid": True, "grid.alpha": 0.3,
                      "savefig.bbox": "tight", "savefig.dpi": 200})
-
-
-def _p(h_min=3e3, clouds=False, **kw):
-    p = scenario("leo")
-    p = replace(p, geometry=replace(p.geometry, h_chord_min=h_min))
-    if clouds:
-        p = replace(p, clouds=replace(p.clouds, model="era5"))
-    return replace(p, **kw)
-
-
-def _run(p, label, configs=None, metrics=("ocean", "e2e"), milp_time=10.0):
-    tic = time.time()
-    configs = configs or [tech_config("leo", 2, p)]
-    r = run(_states(), p, configs, T0, T1, every=1, metrics=metrics,
-            workers=WORKERS, milp_time=milp_time)
-    r["hour"] = (r["time"] - DAY) / 3600.0
-    c = configs[0].label
-    print(f"  {label}: {time.time() - tic:.0f} s, ocean {(r[f'ocean_{c}'] > 0).mean():.0%}, "
-          f"e2e {(r[f'e2e_{c}'] > 0).mean():.0%}, mean e2e {r[f'e2e_{c}'].mean() / 1e9:.0f} "
-          f"Gbit/s", flush=True)
-    return r.assign(variant=label)
-
-
 _CACHE = {}
 
 
@@ -72,6 +51,24 @@ def _states():
     return _CACHE["s"]
 
 
+def _run(p, label, configs=None, milp_time=2.0):
+    tic = time.time()
+    configs = configs or [tech_config("leo", 2, p)]
+    r = run(_states(), p, configs, T0, T1, every=1, workers=WORKERS, milp_time=milp_time)
+    r["hour"] = (r["time"] - DAY) / 3600.0
+    c = f"cap_{configs[0].label}"
+    gap = 1 - r[c].sum() / r[f"{c}_bound"].sum()
+    print(f"  {label}: {time.time() - tic:.0f} s, capacity {r[c].mean() / 1e9:.0f} Gbit/s "
+          f"(min {r[c].min() / 1e9:.0f}, gap to bound {gap:.0%}), Frankfurt-New York connected "
+          f"{r['connected'].sum()}/{len(r)}", flush=True)
+    return r.assign(variant=label)
+
+
+def _out(name):
+    OUT.mkdir(parents=True, exist_ok=True)
+    return OUT / f"{name}.csv"
+
+
 def _save(fig, name):
     FIG.mkdir(parents=True, exist_ok=True)
     fig.savefig(FIG / f"{name}.png")
@@ -79,70 +76,79 @@ def _save(fig, name):
     print(f"figures/quick/{name}.png")
 
 
-def _bars(ax, rows, col, fn, ylabel):
-    x = np.arange(len(rows))
-    ax.bar(x - 0.2, [fn(r[f"ocean_{col}"]) for r in rows], 0.4, label="ocean")
-    ax.bar(x + 0.2, [fn(r[f"e2e_{col}"]) for r in rows], 0.4, label="Frankfurt–New York")
-    ax.set_xticks(x, [r["variant"].iloc[0] for r in rows], rotation=35, ha="right", fontsize=6)
-    ax.set_ylabel(ylabel)
-    ax.legend(fontsize=6)
+def _latency(ax, rows):
+    ref = benchmarks()
+    for i, r in enumerate(rows):
+        ax.plot(r["hour"] + 0.3 * i, r["min_delay"] * 1e3, "o", label=r["variant"].iloc[0])
+    for lab, v in (("vacuum", "vacuum"), ("HF (scaled)", "hf_scaled"),
+                   ("fibre + microwave", "fibre_microwave_published")):
+        ax.axhline(ref[v] * 1e3, color="k", lw=0.6, ls=":")
+        ax.text(3.6, ref[v] * 1e3 + 0.15, lab, fontsize=6)
+    ax.set_xlabel("time [h UTC] (missing dot = no path)")
+    ax.set_ylabel("Frankfurt–New York one-way latency [ms]")
+    ax.set_ylim(20, 33)
 
 
-def hmin():
-    """Clear sky vs. ERA5 clouds (with RF fallback of the ground links), h_min = 3 km."""
-    rows = [_run(_p(), "clear sky"), _run(_p(clouds=True), "ERA5 clouds + RF")]
-    pd.concat(rows).to_csv(_out("hmin"), index=False)
-    fig, axes = plt.subplots(1, 2, figsize=(7.5, 2.8))
-    _bars(axes[0], rows, "leo_k2", lambda s: (s > 0).mean(), "share of snapshots connected")
-    _bars(axes[1], rows, "leo_k2", lambda s: s.mean() / 1e9, "mean capacity [Gbit/s]")
-    fig.suptitle("100 Gbit/s links, K=2, min. ray height 3 km, 4 snapshots", fontsize=8)
-    _save(fig, "q1_hmin")
+def overview():
+    r = _run(scenario("leo"), "ERA5")
+    r.to_csv(_out("overview"), index=False)
+    fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
+    axes[0].bar(r["hour"], r["cap_leo_k2"] / 1e9, width=2)
+    axes[0].set_ylabel("capacity Europe → N. America [Gbit/s]")
+    axes[1].bar(r["hour"] - 0.5, r["eu_access"], width=1, label="aircraft with access, Europe")
+    axes[1].bar(r["hour"] + 0.5, r["na_access"], width=1, label="… North America")
+    axes[1].set_ylabel("aircraft with land access")
+    axes[1].legend(fontsize=6)
+    for ax in axes[:2]:
+        ax.set_xlabel("time [h UTC]")
+        ax.set_xticks(r["hour"])
+    _latency(axes[2], [r])
+    fig.suptitle("9 Jul 2023, ERA5 clouds, 100 Gbit/s links, K=2", fontsize=8)
+    _save(fig, "q1_overview")
 
 
 def clouds():
-    p = _p(clouds=True)
-    rows = [_run(_p(), "clear sky"),
-            _run(replace(p, ground=replace(p.ground, rf_rate=0.0)), "ERA5, optical only"),
-            _run(p, "ERA5 + RF 10 Gbit/s"),
-            _run(replace(p, clouds=replace(p.clouds, de_ice=25e-6)), "ERA5 + RF, ice D_e=25 um")]
+    p = scenario("leo")
+    rows = [_run(p, "RF fallback (default)"),
+            _run(replace(p, ground=replace(p.ground, rf_rate=0.0)), "optical only"),
+            _run(replace(p, clouds=replace(p.clouds, de_ice=25e-6)), "ice D_e = 25 um")]
     pd.concat(rows).to_csv(_out("clouds"), index=False)
     fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
-    _bars(axes[0], rows, "leo_k2", lambda s: (s > 0).mean(), "share of the day connected")
-    _bars(axes[1], rows, "leo_k2", lambda s: s.mean() / 1e9, "mean capacity [Gbit/s]")
-    ref = benchmarks()
-    for i, r in enumerate(rows):
-        axes[2].plot(r["hour"] + 0.25 * i, r["min_delay"] * 1e3, "o", label=r["variant"].iloc[0])
-    for lab, v in (("vacuum", "vacuum"), ("fibre+MW", "fibre_microwave_published")):
-        axes[2].axhline(ref[v] * 1e3, color="k", lw=0.6, ls=":")
-        axes[2].text(3.5, ref[v] * 1e3 + 0.1, lab, fontsize=6)
-    axes[2].set_xlabel("time [h UTC] (missing dot = no path)")
-    axes[2].set_ylabel("min. one-way latency [ms]")
-    axes[2].set_ylim(20, 33)
-    axes[2].legend(fontsize=5)
+    x = np.arange(len(rows))
+    labels = [r["variant"].iloc[0] for r in rows]
+    axes[0].bar(x, [r["cap_leo_k2"].mean() / 1e9 for r in rows])
+    axes[0].set_ylabel("mean capacity Europe → N. America [Gbit/s]")
+    axes[1].bar(x, [r["connected"].mean() for r in rows])
+    axes[1].set_ylabel("share of snapshots: Frankfurt–NY path")
+    axes[1].set_ylim(0, 1.05)
+    for ax in axes[:2]:
+        ax.set_xticks(x, labels, rotation=20, ha="right", fontsize=7)
+    _latency(axes[2], rows)
+    axes[2].legend(fontsize=6)
     _save(fig, "q2_clouds")
 
 
 def tech():
-    p = _p(clouds=True)
-    configs = [tech_config(t, k, p) for t in ("leo", "dwdm") for k in (2, 4)]
-    r = _run(p, "ERA5 seed 0", configs=configs)
+    p = scenario("leo")
+    names = ("leo", "dwdm")
+    configs = [tech_config(t, k, p) for t in names for k in (2, 4)]
+    r = _run(p, "ERA5", configs=configs)
     r.to_csv(_out("tech"), index=False)
-    fig, axes = plt.subplots(1, 2, figsize=(9, 2.8), sharey=True)
-    for ax, m in zip(axes, ("ocean", "e2e"), strict=True):
-        for k, col in ((2, "#1b9e77"), (4, "#d95f02")):
-            rates = [TECHS[t].r_max for t in ("leo", "dwdm")]
-            caps = [r[f"{m}_{t}_k{k}"].mean() for t in ("leo", "dwdm")]
-            chains = r[f"{m}_leo_k{k}"].mean() / TECHS["leo"].r_max
-            ax.loglog([TECHS["demo"].r_max, 1e11], [chains * TECHS["demo"].r_max, chains * 1e11],
-                      color=col, ls="--")
-            ax.loglog(rates, caps, "o-", color=col, label=f"K={k}")
-        ax.axhline(250e12, color="k", lw=0.6, ls=":")
-        ax.text(3e9, 280e12, "one cable (250 Tbit/s)", fontsize=6)
-        ax.axvspan(1e9, 2.6e9, color="0.85")
-        ax.set_title({"ocean": "oceanic section", "e2e": "Frankfurt–New York"}[m], fontsize=8)
-        ax.set_xlabel("rate per link R_max [bit/s]")
-    axes[0].set_ylabel("mean capacity [bit/s], ERA5 clouds")
-    axes[0].legend(fontsize=6)
+    fig, ax = plt.subplots(figsize=(4.5, 3))
+    for k, col in ((2, "#1b9e77"), (4, "#d95f02")):
+        rates = [TECHS[t].r_max for t in names]
+        caps = [r[f"cap_{t}_k{k}"].mean() for t in names]
+        chains = caps[0] / TECHS["leo"].r_max
+        ax.loglog([TECHS["demo"].r_max, 1e11], [chains * TECHS["demo"].r_max, chains * 1e11],
+                  color=col, ls="--")
+        ax.loglog(rates, caps, "o-", color=col, label=f"K={k}")
+    ax.axhline(250e12, color="k", lw=0.6, ls=":")
+    ax.text(3e9, 280e12, "one cable (250 Tbit/s)", fontsize=6)
+    ax.axvspan(1e9, 2.6e9, color="0.85")
+    ax.text(1.1e9, 3e9, "demon-\nstrated", fontsize=6)
+    ax.set_xlabel("rate per link R_max [bit/s]")
+    ax.set_ylabel("mean capacity Europe → N. America [bit/s]")
+    ax.legend(fontsize=6)
     _save(fig, "q4_tech")
 
 
@@ -150,9 +156,9 @@ def newyork():
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
 
-    t = T0 + 14 * 3600
-    st = pd.read_parquet(STATES)
-    snap = select_fleet(st[st.time == t], True, 1.0, 0)
+    t = DAY + 14 * 3600
+    st = pd.read_parquet(STATES, filters=[("time", "==", t)])
+    snap = select_fleet(st, True, 1.0, 0)
     R = 6_371_008.8
     g = geo.to_ecef(NEW_YORK.lat, NEW_YORK.lon, NEW_YORK.alt, R)
     pos = geo.to_ecef(snap.lat.to_numpy(), snap.lon.to_numpy(), snap.alt.to_numpy(), R)
@@ -189,12 +195,7 @@ def snapshot_map():
     figures.fig_map()
 
 
-def _out(name):
-    OUT.mkdir(parents=True, exist_ok=True)
-    return OUT / f"{name}.csv"
-
-
-EXPERIMENTS = {"hmin": hmin, "clouds": clouds, "tech": tech, "newyork": newyork,
+EXPERIMENTS = {"overview": overview, "clouds": clouds, "tech": tech, "newyork": newyork,
                "map": snapshot_map}
 
 if __name__ == "__main__":

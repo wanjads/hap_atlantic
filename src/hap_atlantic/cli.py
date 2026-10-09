@@ -45,7 +45,7 @@ def main(argv=None) -> None:
     sim.add_argument("--k", type=int, default=2, help="terminals per aircraft")
     sim.add_argument("--every", type=int, default=10, help="evaluate every n-th time step")
     sim.add_argument("--sites", type=int, default=None, help="ground stations per endpoint")
-    sim.add_argument("--clouds", choices=["clear", "era5"], default="clear")
+    sim.add_argument("--clouds", choices=["clear", "era5"], default="era5")
     sim.add_argument("--rf-rate", type=float, default=None, help="RF fallback rate [Gbit/s]")
     sim.add_argument("--equipage", type=float, default=None)
     sim.add_argument("--all-aircraft", action="store_true", help="not only jet airliners")
@@ -117,8 +117,7 @@ def main(argv=None) -> None:
         out = args.out or f"results/{Path(args.states).stem}_{cfg.label}_{args.clouds}.csv"
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         res.to_csv(out, index=False)
-        cols = [f"{m}_{cfg.label}" for m in ("ocean", "backbone", "e2e")]
-        print((res[cols] / 1e9).describe().round(1).to_string())
+        print((res[[f"cap_{cfg.label}"]] / 1e9).describe().round(1).to_string())
         print(f"connected {res['connected'].mean():.1%}, median min delay "
               f"{res.loc[res['connected'], 'min_delay'].median() * 1e3:.2f} ms")
     elif args.cmd == "weather":

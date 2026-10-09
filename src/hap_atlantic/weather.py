@@ -222,3 +222,19 @@ class CloudState:
         i = int(np.clip(np.rint((lat - f.lats[0]) / 0.25), 0, len(f.lats) - 1))
         j = int(np.clip(np.rint((lon - f.lons[0]) / 0.25), 0, len(f.lons) - 1))
         return bool(self.rain_field[i, j] <= rain_max)
+
+
+def land_sea_mask(cache: Path = CACHE):
+    """ERA5 land-sea mask (lat, lon, lsm) on 0.25 deg, cached."""
+    f = cache / "land_sea_mask.npz"
+    if not f.exists():
+        import xarray as xr
+
+        ds = xr.open_zarr(ARCO, chunks=None, storage_options={"token": "anon"})
+        lsm = ds["land_sea_mask"].isel(time=int(np.searchsorted(
+            ds.time.values, np.datetime64("2023-01-01T00:00")))).values
+        cache.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(f, lsm=lsm.astype(np.float16), lat=ds.latitude.values,
+                            lon=(ds.longitude.values + 180) % 360 - 180)
+    d = np.load(f)
+    return d["lat"], d["lon"], d["lsm"].astype(float)

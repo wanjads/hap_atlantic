@@ -19,8 +19,7 @@ import pandas as pd
 from hap_atlantic import flow
 from hap_atlantic.config import FRANKFURT, K_VALUES, NEW_YORK, TECHS, scenario
 from hap_atlantic.reference import benchmarks
-from hap_atlantic.simulate import OCEAN_LON_EAST, OCEAN_LON_WEST
-from hap_atlantic.topology import build_graph
+from hap_atlantic.topology import DST, SRC, build_graph, land_graph
 from hap_atlantic.traffic import select_fleet
 from hap_atlantic.weather import CloudField
 
@@ -103,6 +102,14 @@ def fig_map(day="summer", hour=12.0):
             ax.plot(*zip(pos[u], pos[v], strict=True), transform=pc, **kw, rasterized=True)
     xy = np.array([pos[v] for v, k in G.nodes(data="kind") if k == "aircraft"])
     ax.scatter(xy[:, 0], xy[:, 1], s=1.5, color="k", transform=pc, zorder=3, lw=0)
+    L = land_graph(G, p, cs)  # aircraft with access from land stations (capacity graph)
+    for end, col, lab in ((SRC, "#2171b5", "access from Europe"),
+                          (DST, "#238b45", "access from North America")):
+        acc = np.array([pos[v] for v in L.neighbors(end)])
+        if len(acc):
+            ax.scatter(acc[:, 0], acc[:, 1], s=2.5, color=col, transform=pc, zorder=3.5, lw=0,
+                       label=lab)
+    ax.legend(loc="upper right", fontsize=6, markerscale=3)
     if path_nodes:
         pts = [pos.get(v) for v in path_nodes if v in pos]
         ax.plot(*zip(*pts, strict=True), color="#ff7f00", lw=1.3, transform=pc, zorder=6,
@@ -110,8 +117,6 @@ def fig_map(day="summer", hour=12.0):
     for site in (FRANKFURT, NEW_YORK):
         ax.plot(site.lon, site.lat, marker="*", ms=9, color="#e6550d", mec="k", mew=0.5,
                 transform=pc, zorder=5)
-    for lon in (OCEAN_LON_EAST, OCEAN_LON_WEST):
-        ax.plot([lon, lon], [34, 66], ls="--", lw=0.8, color="#3182bd", transform=pc)
     ax.plot([FRANKFURT.lon, NEW_YORK.lon], [FRANKFURT.lat, NEW_YORK.lat], transform=ccrs.Geodetic(),
             color="#e6550d", lw=0.6, ls=":")
     n_clear = sum(1 for *_, k in G.edges(data="kind") if k == "air")
@@ -134,10 +139,10 @@ def fig_daily():
             continue
         h = _hours(df, day)
         for k in K_VALUES:
-            ax.step(h, df[f"ocean_leo_k{k}"] / 100e9, where="post", color=KCOL[k],
+            ax.step(h, df[f"cap_leo_k{k}"] / 100e9, where="post", color=KCOL[k],
                     label=f"$K={k}$")
         st = select_fleet(pd.read_parquet(DAY_FILES[day][0]), True, 1.0, 0)
-        oc = st[(st.lon > OCEAN_LON_WEST) & (st.lon < OCEAN_LON_EAST) & (st.alt > 8000)]
+        oc = st[(st.lon > -55.0) & (st.lon < -15.0) & (st.alt > 8000)]
         n = oc.groupby("time").size()
         ax2 = ax.twinx()
         ax2.plot(_hours(n.reset_index(), day), n.to_numpy(), color="0.55", lw=0.8, ls="--")

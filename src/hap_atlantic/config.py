@@ -75,13 +75,19 @@ class GroundParams:
     rf_rate: float = 10e9  # RF fallback rate per ground link when cloudy, 0 = optical only [bit/s]
     rf_rain_max: float = 5.0  # RF ground links fail above this rain rate [mm/h]
     fiber_detour: float = 1.3  # terrestrial fibre route length / great-circle distance [-]
+    # capacity: optical ground stations everywhere on land (ERA5 land-sea mask, 0.25 deg);
+    # Europe incl. British Isles east of land_eu_lon, North America west of land_na_lon;
+    # Iceland, Greenland and the Azores are excluded
+    land_eu_lon: float = -12.0
+    land_na_lon: float = -52.0
+    land_candidates: int = 6  # nearest land points tried per aircraft
 
 
 @dataclass(frozen=True)
 class CloudParams:
     """Cloud attenuation of optical links from 3D ERA5 cloud fields (see weather.py)."""
 
-    model: str = "clear"  # "clear" (no clouds) or "era5"
+    model: str = "era5"  # "era5" or "clear" (no clouds, only for tests)
     l_corr: float = 50e3  # horizontal correlation length of cloud occurrence [m]
     lz_corr: float = 2e3  # vertical correlation length (cloud overlap) [m]
     t_corr: float = 3600.0  # correlation time [s] (~ l_corr / wind speed)
