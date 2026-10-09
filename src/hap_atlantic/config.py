@@ -43,7 +43,8 @@ class TerminalParams:
     d_rx: float = 0.10  # receive aperture diameter [m]
     eta_optics: float = 0.5  # combined Tx/Rx optics efficiency [-]
     pointing_loss_db: float = 3.0  # mean pointing / tracking loss [dB]
-    photons_per_bit: float = 20.0  # receiver sensitivity (coherent, incl. FEC) [photons/bit]
+    photons_per_bit: float = 8.0  # receiver sensitivity [photons/bit]: 7.8 measured at 210 Gbit/s
+    # over a 53 km free-space link (Horst et al. 2023)
     r_max: float = 100e9  # transceiver line-rate limit per link [bit/s]
     outage_prob: float = 1e-3  # target outage probability for the turbulence fade margin
     hop_delay: float = 10e-6  # per-hop processing delay (coherent DSP + FEC + switch) [s]
