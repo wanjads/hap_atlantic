@@ -7,10 +7,15 @@ links, K = 2, minimum elevation 5 deg, minimum air-to-air ray height 3 km.
 * latency:  Frankfurt -> New York (NY4), one station per endpoint, RF fallback
 
     python scripts/quick.py overview  # capacity and latency per snapshot
-    python scripts/quick.py clouds    # RF fallback on/off, ice crystal size
+    python scripts/quick.py clouds    # RF fallback on/off
     python scripts/quick.py tech      # rate per link x terminals per aircraft
     python scripts/quick.py newyork   # map: airliners around New York, elevation rings
     python scripts/quick.py map       # map of one snapshot
+
+Results are stored in results/quick/<name>.csv; `--plot` only redraws the figures from
+these files (no simulation):
+
+    python scripts/quick.py --plot overview clouds tech
 """
 
 from __future__ import annotations
@@ -90,8 +95,11 @@ def _latency(ax, rows):
 
 
 def overview():
-    r = _run(scenario("leo"), "ERA5")
-    r.to_csv(_out("overview"), index=False)
+    _run(scenario("leo"), "ERA5").to_csv(_out("overview"), index=False)
+
+
+def plot_overview():
+    r = pd.read_csv(_out("overview"))
     fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
     axes[0].bar(r["hour"], r["cap_leo_k2"] / 1e9, width=2)
     axes[0].set_ylabel("capacity Europe → N. America [Gbit/s]")
@@ -110,9 +118,14 @@ def overview():
 def clouds():
     p = scenario("leo")
     rows = [_run(p, "RF fallback (default)"),
-            _run(replace(p, ground=replace(p.ground, rf_rate=0.0)), "optical only"),
-            _run(replace(p, clouds=replace(p.clouds, de_ice=25e-6)), "ice D_e = 25 um")]
+            _run(replace(p, ground=replace(p.ground, rf_rate=0.0)), "optical only")]
     pd.concat(rows).to_csv(_out("clouds"), index=False)
+
+
+def plot_clouds():
+    df = pd.read_csv(_out("clouds"))
+    df = df[~df["variant"].str.startswith("ice")]  # crystal-size test dropped
+    rows = [g for _, g in df.groupby("variant", sort=False)]
     fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
     x = np.arange(len(rows))
     labels = [r["variant"].iloc[0] for r in rows]
@@ -132,8 +145,12 @@ def tech():
     p = scenario("leo")
     names = ("leo", "dwdm")
     configs = [tech_config(t, k, p) for t in names for k in (2, 4)]
-    r = _run(p, "ERA5", configs=configs)
-    r.to_csv(_out("tech"), index=False)
+    _run(p, "ERA5", configs=configs).to_csv(_out("tech"), index=False)
+
+
+def plot_tech():
+    r = pd.read_csv(_out("tech"))
+    names = ("leo", "dwdm")
     fig, ax = plt.subplots(figsize=(4.5, 3))
     for k, col in ((2, "#1b9e77"), (4, "#d95f02")):
         rates = [TECHS[t].r_max for t in names]
@@ -197,7 +214,14 @@ def snapshot_map():
 
 EXPERIMENTS = {"overview": overview, "clouds": clouds, "tech": tech, "newyork": newyork,
                "map": snapshot_map}
+PLOTS = {"overview": plot_overview, "clouds": plot_clouds, "tech": plot_tech}
 
 if __name__ == "__main__":
-    for name in sys.argv[1:] or EXPERIMENTS:
-        EXPERIMENTS[name]()
+    args = sys.argv[1:]
+    plot_only = "--plot" in args
+    names = [a for a in args if a != "--plot"] or list(PLOTS if plot_only else EXPERIMENTS)
+    for name in names:
+        if not plot_only:
+            EXPERIMENTS[name]()
+        if name in PLOTS:
+            PLOTS[name]()
