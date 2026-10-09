@@ -69,8 +69,9 @@ class GeometryParams:
 class GroundParams:
     """Optical ground stations around each endpoint (site diversity)."""
 
-    n_sites: int = 1  # number of ground stations per endpoint
-    ring_radius: float = 50e3  # sites are placed on a ring of this radius [m]
+    # latency service: stations at the endpoint and on rings around it (land points only)
+    site_rings: tuple = (75e3, 150e3)  # ring radii [m]
+    site_bearings: int = 8  # stations per ring
     terminals_per_site: int = 4
     rf_rate: float = 10e9  # RF fallback rate per ground link when cloudy, 0 = optical only [bit/s]
     rf_rain_max: float = 5.0  # RF ground links fail above this rain rate [mm/h]
@@ -113,8 +114,7 @@ class Params:
     clouds: CloudParams = field(default_factory=CloudParams)
     atmosphere: AtmosphereParams = field(default_factory=AtmosphereParams)
     terminals_per_aircraft: int = 2
-    airliners_only: bool = True  # only jet airliners (ICAO type list in traffic.py) are nodes
-    equipage: float = 1.0  # fraction of those airliners that carry terminals [-]
+    airliners_only: bool = True  # all jet airliners (ICAO type list in traffic.py) carry terminals
     source: Site = FRANKFURT
     sink: Site = NEW_YORK
     dt: float = 60.0  # simulation time step [s]

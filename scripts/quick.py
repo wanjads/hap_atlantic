@@ -1,76 +1,96 @@
-"""Mini sanity-check experiments (seconds each) with figures in figures/quick/.
+"""Experiments of the paper (seconds to minutes each); figures in figures/quick/.
 
-9 July 2023, one snapshot per hour (24), always with ERA5 clouds and RF fallback of the
-ground links, 100 Gbit/s links, K = 2, minimum elevation 5 deg, minimum air-to-air ray
-height 3 km, MILP time limit 10 s (the upper bound is stored and plotted).
+Two days: 9 July 2023 (summer, all-time Shanwick record) and 16 January 2024 (winter
+weekday). One snapshot per hour (24 per day), always with ERA5 clouds and RF fallback of
+the ground links, minimum elevation 5 deg, minimum air-to-air ray height 3 km;
+capacities within 1 % of the upper bound (MILP limit 30 s; the bound is plotted).
 
 * capacity: ground stations everywhere on land, Europe -> North America
-* latency:  Frankfurt -> New York (NY4), one station per endpoint, RF fallback
+* latency:  Frankfurt -> New York (NY4), stations at the endpoints and on rings of 75 and
+            150 km around them (land points only)
 
-    python scripts/quick.py overview  # capacity and latency per snapshot
-    python scripts/quick.py tech      # rate per link x terminals per aircraft
-    python scripts/quick.py newyork   # map: airliners around New York, elevation rings
-    python scripts/quick.py map       # map of one snapshot
+    python scripts/quick.py overview   # capacity and latency per hour (100 Gbit/s, K=2)
+    python scripts/quick.py tech       # rate per link 1 Gbit/s - 1 Tbit/s x K = 2, 4
+    python scripts/quick.py map        # world map of one snapshot (12 UTC)
+    python scripts/quick.py newyork    # airliners and ground stations around New York
+    python scripts/quick.py frankfurt  # the same around Frankfurt
+    python scripts/quick.py --day winter overview      # only one day (default: both)
+    python scripts/quick.py --plot overview tech       # redraw from results/quick/*.csv
 
-Results are stored in results/quick/<name>.csv; `--plot` only redraws the figures from
-these files (no simulation):
-
-    python scripts/quick.py --plot overview tech
+Results are stored in results/quick/<name>_<day>.csv.
 """
 
 from __future__ import annotations
 
-import sys
+import argparse
 import time
 from pathlib import Path
 
+import matplotlib as mpl
+import matplotlib.patheffects
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from hap_atlantic import flow
 from hap_atlantic import geometry as geo
-from hap_atlantic.config import NEW_YORK, scenario
+from hap_atlantic.config import FRANKFURT, NEW_YORK, scenario
 from hap_atlantic.reference import benchmarks
-from hap_atlantic.simulate import Config, run, tech_config
+from hap_atlantic.simulate import Config, run
+from hap_atlantic.topology import build_graph, ground_stations
 from hap_atlantic.traffic import select_fleet
+from hap_atlantic.weather import CloudField
 
-STATES = "data/processed/20230708-10.parquet"
-DAY = pd.Timestamp("2023-07-09", tz="UTC").timestamp()
-T0, T1 = DAY, DAY + 86400.0
-EVERY = 60  # minutes -> one snapshot per hour
+DAYS = {
+    "summer": ("data/processed/20230708-10.parquet", "2023-07-09", "9 Jul 2023"),
+    "winter": ("data/processed/20240115-17.parquet", "2024-01-16", "16 Jan 2024"),
+}
+COLORS = {"summer": "#d95f02", "winter": "#1f78b4"}
 OUT, FIG = Path("results/quick"), Path("figures/quick")
 WORKERS = 4
+RATES = (1e9, 1e10, 1e11, 1e12)  # bit/s per link; 1 W up to 100 Gbit/s, 5 W at 1 Tbit/s
 
 plt.rcParams.update({"font.size": 8, "axes.grid": True, "grid.alpha": 0.3,
                      "savefig.bbox": "tight", "savefig.dpi": 200})
-_CACHE = {}
 
 
-def _states():
-    """The 4 snapshots only (read once)."""
-    if "s" not in _CACHE:
-        st = pd.read_parquet(STATES, filters=[("time", ">=", T0), ("time", "<", T1)])
-        times = np.sort(st["time"].unique())[::EVERY]
-        _CACHE["s"] = st[st["time"].isin(times)]
-    return _CACHE["s"]
+def _t0(day):
+    return pd.Timestamp(DAYS[day][1], tz="UTC").timestamp()
 
 
-def _run(p, label, configs=None, milp_time=10.0):
+def _states(day):
+    """One snapshot per hour of the day."""
+    t0 = _t0(day)
+    st = pd.read_parquet(DAYS[day][0], filters=[("time", ">=", t0), ("time", "<", t0 + 86400)])
+    return st[(st["time"] - t0) % 3600 == 0]
+
+
+def _config(r_max, k, p):
+    return Config(f"r{r_max:.0e}_k{k}", r_max, (5.0 if r_max > 1e11 else 1.0) / p.terminal.p_tx,
+                  k)
+
+
+def _run(day, configs, milp_time=30.0):
     tic = time.time()
-    configs = configs or [tech_config("leo", 2, p)]
-    r = run(_states(), p, configs, T0, T1, every=1, workers=WORKERS, milp_time=milp_time)
-    r["hour"] = (r["time"] - DAY) / 3600.0
+    t0 = _t0(day)
+    r = run(_states(day), scenario("leo"), configs, t0, t0 + 86400, every=1, workers=WORKERS,
+            milp_time=milp_time)
+    r["hour"] = (r["time"] - t0) / 3600.0
     c = f"cap_{configs[0].label}"
     gap = 1 - r[c].sum() / r[f"{c}_bound"].sum()
-    print(f"  {label}: {time.time() - tic:.0f} s, capacity {r[c].mean() / 1e9:.0f} Gbit/s "
-          f"(min {r[c].min() / 1e9:.0f}, gap to bound {gap:.0%}), Frankfurt-New York connected "
+    print(f"  {day}: {time.time() - tic:.0f} s, capacity {r[c].mean() / 1e9:.0f} Gbit/s "
+          f"(gap to bound {gap:.1%}), Frankfurt-New York connected "
           f"{r['connected'].sum()}/{len(r)}", flush=True)
-    return r.assign(variant=label)
+    return r.assign(day=day)
 
 
-def _out(name):
+def _out(name, day):
     OUT.mkdir(parents=True, exist_ok=True)
-    return OUT / f"{name}.csv"
+    return OUT / f"{name}_{day}.csv"
+
+
+def _read(name, days):
+    return {d: pd.read_csv(_out(name, d)) for d in days if _out(name, d).exists()}
 
 
 def _save(fig, name):
@@ -80,131 +100,191 @@ def _save(fig, name):
     print(f"figures/quick/{name}.png")
 
 
-def _latency(ax, rows):
+def _time_axis(ax):
+    ax.set_xticks(range(0, 24, 3), [f"{h:02d}:00" for h in range(0, 24, 3)])
+    ax.set_xlim(-0.7, 23.7)
+    ax.set_xlabel("time (UTC)")
+
+
+# --- capacity and latency over the day ---------------------------------------------------
+
+
+def overview(day):
+    p = scenario("leo")
+    _run(day, [_config(1e11, 2, p)]).to_csv(_out("overview", day), index=False)
+
+
+def plot_overview(days):
+    res = _read("overview", days)
+    col = "cap_r1e+11_k2"
+    fig, ax = plt.subplots(figsize=(4.5, 2.8))
+    w = 0.8 / max(len(res), 1)
+    for i, (d, r) in enumerate(res.items()):
+        x = r["hour"] + (i - (len(res) - 1) / 2) * w
+        ax.bar(x, r[col] / 1e9, width=w, color=COLORS[d], label=DAYS[d][2])
+        ax.plot(x, r[f"{col}_bound"] / 1e9, "k_", ms=4, mew=1.2)
+    ax.plot([], [], "k_", ms=6, mew=1.2, label="upper bound")
+    ax.set_ylabel("capacity Europe → N. America [Gbit/s]")
+    _time_axis(ax)
+    ax.legend(fontsize=6)
+    _save(fig, "q1_capacity")
+
+    fig, ax = plt.subplots(figsize=(4.5, 2.8))
     ref = benchmarks()
-    for i, r in enumerate(rows):
-        ax.plot(r["hour"] + 0.3 * i, r["min_delay"] * 1e3, "o", ms=3,
-                label=r["variant"].iloc[0])
+    for i, (d, r) in enumerate(res.items()):
+        ax.plot(r["hour"] + 0.2 * i, r["min_delay"] * 1e3, "o", ms=3, color=COLORS[d],
+                label=DAYS[d][2])
     for lab, v in (("vacuum", "vacuum"), ("HF (scaled)", "hf_scaled"),
                    ("fibre + microwave", "fibre_microwave_published")):
         ax.axhline(ref[v] * 1e3, color="k", lw=0.6, ls=":")
         ax.text(0.2, ref[v] * 1e3 + 0.15, lab, fontsize=6)
-    ax.set_xlabel("time [h UTC] (missing dot = no path)")
-    ax.set_xlim(-0.5, 24)
+    _time_axis(ax)
     ax.set_ylabel("Frankfurt–New York one-way latency [ms]")
     ax.set_ylim(20, 33)
+    ax.legend(fontsize=6, loc="center right")
+    _save(fig, "q1_latency")
 
 
-def overview():
-    _run(scenario("leo"), "ERA5").to_csv(_out("overview"), index=False)
+# --- rate per link x terminals ------------------------------------------------------------
 
 
-def plot_overview():
-    r = pd.read_csv(_out("overview"))
-    fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
-    axes[0].bar(r["hour"], r["cap_leo_k2"] / 1e9, width=0.8, label="achieved (MILP, 10 s)")
-    axes[0].plot(r["hour"], r["cap_leo_k2_bound"] / 1e9, "k_", ms=9, mew=1.5,
-                 label="upper bound")
-    axes[0].set_ylabel("capacity Europe → N. America [Gbit/s]")
-    axes[0].legend(fontsize=6)
-    axes[1].bar(r["hour"] - 0.2, r["eu_access"], width=0.4, label="aircraft with access, Europe")
-    axes[1].bar(r["hour"] + 0.2, r["na_access"], width=0.4, label="… North America")
-    axes[1].set_ylabel("aircraft with land access")
-    axes[1].legend(fontsize=6)
-    for ax in axes[:2]:
-        ax.set_xlabel("time [h UTC]")
-        ax.set_xticks(range(0, 24, 3))
-    _latency(axes[2], [r])
-    fig.suptitle("9 Jul 2023, ERA5 clouds, 100 Gbit/s links, K=2", fontsize=8)
-    _save(fig, "q1_overview")
-
-
-RATES = (1e9, 1e10, 1e11, 1e12)  # bit/s per link; 1 W up to 100 Gbit/s, 5 W at 1 Tbit/s
-
-
-def _rate_configs(p):
-    return [Config(f"r{r:.0e}_k{k}", r, (5.0 if r > 1e11 else 1.0) / p.terminal.p_tx, k)
-            for k in (2, 4) for r in RATES]
-
-
-def tech():
+def tech(day):
     p = scenario("leo")
-    _run(p, "ERA5", configs=_rate_configs(p)).to_csv(_out("tech"), index=False)
+    configs = [_config(r, k, p) for k in (2, 4) for r in RATES]
+    _run(day, configs).to_csv(_out("tech", day), index=False)
 
 
-def plot_tech():
-    r = pd.read_csv(_out("tech"))
+def plot_tech(days):
+    res = _read("tech", days)
     fig, ax = plt.subplots(figsize=(4.5, 3))
-    for k, col in ((2, "#1b9e77"), (4, "#d95f02")):
-        cap = np.array([r[f"cap_r{x:.0e}_k{k}"].mean() for x in RATES])
-        ub = np.array([r[f"cap_r{x:.0e}_k{k}_bound"].mean() for x in RATES])
-        ax.loglog(RATES, cap, "o-", color=col, label=f"K={k}, achieved (MILP, 10 s)")
-        ax.loglog(RATES, ub, "_", color=col, ms=10, mew=1.5)
-    ax.plot([], [], "k_", ms=10, mew=1.5, label="upper bound")
+    for d, r in res.items():
+        for k, ls, mk in ((2, "-", "o"), (4, "--", "s")):
+            cap = [r[f"cap_r{x:.0e}_k{k}"].mean() for x in RATES]
+            ub = [r[f"cap_r{x:.0e}_k{k}_bound"].mean() for x in RATES]
+            ax.loglog(RATES, cap, ls=ls, marker=mk, ms=4, color=COLORS[d],
+                      label=f"{DAYS[d][2]}, K={k}")
+            ax.loglog(RATES, ub, "_", color="k", ms=8, mew=1.2)
+    ax.plot([], [], "k_", ms=8, mew=1.2, label="upper bound")
     ax.axhline(250e12, color="k", lw=0.6, ls=":")
     ax.text(1.1e9, 280e12, "one cable (250 Tbit/s)", fontsize=6)
     ax.axvspan(9e8, 2.6e9, color="0.85")
     ax.text(1.0e9, 1.2e15, "demonstrated", fontsize=6)
     ax.set_xlim(7e8, 1.5e12)
-    ax.set_ylim(5e9, 3e15)
+    ax.set_ylim(2e9, 3e15)
     ax.set_xlabel("rate per link R_max [bit/s]")
     ax.set_ylabel("mean capacity Europe → N. America [bit/s]")
     ax.legend(fontsize=6, loc="lower right")
     _save(fig, "q4_tech")
 
 
-def newyork():
+# --- maps --------------------------------------------------------------------------------
+
+
+def snapshot_map(day, hour=12):
+    """Airliners (dots), cloud at cruise level (8-12.5 km), min-latency path Frankfurt-NY."""
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
 
-    t = DAY + 14 * 3600
-    st = pd.read_parquet(STATES, filters=[("time", "==", t)])
-    snap = select_fleet(st, True, 1.0, 0)
-    R = 6_371_008.8
-    g = geo.to_ecef(NEW_YORK.lat, NEW_YORK.lon, NEW_YORK.alt, R)
+    t0 = _t0(day)
+    t = t0 + hour * 3600
+    p = scenario("leo")
+    snap = select_fleet(pd.read_parquet(DAYS[day][0], filters=[("time", "==", t)]))
+    field = CloudField(t0 - 3600, t0 + 86400 + 3600, p.clouds, p.seed, p.geometry.earth_radius)
+    cs = field.at(t)
+    G = build_graph(snap, p, cs)
+    delay, path = flow.min_latency_path(G)
+    print(f"  {day} {hour:02d}:00 UTC: min. delay {delay * 1e3:.2f} ms, {len(path) - 1} hops")
+    pc = ccrs.PlateCarree()
+    fig = plt.figure(figsize=(7.16, 3.1))
+    ax = fig.add_subplot(1, 1, 1, projection=ccrs.LambertConformal(
+        central_longitude=-33, central_latitude=50, standard_parallels=(40, 60)))
+    ax.set_extent([-80, 14, 34, 66], crs=pc)
+    ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="#eeeeee", edgecolor="none")
+    ax.add_feature(cfeature.COASTLINE.with_scale("110m"), linewidth=0.4, color="0.5")
+    cruise = (field.heights >= 8e3) & (field.heights <= 12.5e3)
+    cloud = (cs.ext[cruise] > 0).any(axis=0)
+    ax.pcolormesh(field.lons, field.lats, np.where(cloud, 1.0, np.nan), transform=pc,
+                  cmap=mpl.colors.ListedColormap(["#9ecae1"]), alpha=0.6, shading="nearest",
+                  rasterized=True)
+    pos = {v: (dd["lon"], dd["lat"]) for v, dd in G.nodes(data=True) if "lon" in dd}
+    xy = np.array([pos[v] for v, k in G.nodes(data="kind") if k == "aircraft"])
+    ax.scatter(xy[:, 0], xy[:, 1], s=1.5, color="k", transform=pc, zorder=3, lw=0)
+    if path:
+        pts = [pos[v] for v in path if v in pos]
+        ax.plot(*zip(*pts, strict=True), color="#ff7f00", lw=1.3, transform=pc, zorder=6,
+                path_effects=[mpl.patheffects.withStroke(linewidth=2.2, foreground="k")])
+    for site in (FRANKFURT, NEW_YORK):
+        ax.plot(site.lon, site.lat, marker="*", ms=9, color="#e6550d", mec="k", mew=0.5,
+                transform=pc, zorder=7)
+    _save(fig, f"map_{day}")
+
+
+def _station_map(day, site, extent, name, hour=14):
+    """Airliners around an endpoint with the latency-service ground stations."""
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    t = _t0(day) + hour * 3600
+    snap = select_fleet(pd.read_parquet(DAYS[day][0], filters=[("time", "==", t)]))
+    p = scenario("leo")
+    R = p.geometry.earth_radius
+    stations = [g.site for g in ground_stations(p) if g.site.name.startswith(site.name)]
     pos = geo.to_ecef(snap.lat.to_numpy(), snap.lon.to_numpy(), snap.alt.to_numpy(), R)
-    el = geo.elevation_deg(np.broadcast_to(g, pos.shape), pos)
+    vis = np.zeros(len(snap), dtype=bool)
+    for st in stations:
+        g = geo.to_ecef(st.lat, st.lon, 0.0, R)
+        vis |= geo.elevation_deg(np.broadcast_to(g, pos.shape), pos) >= 5
+    vis &= snap.alt.to_numpy() >= 3000
     pc = ccrs.PlateCarree()
     fig = plt.figure(figsize=(6, 4.5))
-    ax = fig.add_subplot(1, 1, 1, projection=ccrs.LambertConformal(-73, 41))
-    ax.set_extent([-78.5, -69, 38.5, 43.5], crs=pc)
+    ax = fig.add_subplot(1, 1, 1, projection=ccrs.LambertConformal(site.lon, site.lat))
+    ax.set_extent(extent, crs=pc)
+    ax.add_feature(cfeature.LAND.with_scale("50m"), facecolor="#f2f2f2", edgecolor="none")
     ax.add_feature(cfeature.COASTLINE.with_scale("50m"), lw=0.5, color="0.5")
+    ax.add_feature(cfeature.BORDERS.with_scale("50m"), lw=0.4, color="0.7")
     sc = ax.scatter(snap.lon, snap.lat, c=snap.alt / 1e3, s=12, cmap="viridis", vmin=0,
                     vmax=12, transform=pc, zorder=3)
-    vis = (el >= 5) & (snap.alt.to_numpy() >= 3000)
     ax.scatter(snap.lon[vis], snap.lat[vis], s=60, facecolor="none", edgecolor="r", lw=0.8,
-               transform=pc, zorder=4, label="visible at ≥5° and above 3 km")
-    for e, ls in ((10, "-"), (5, "--")):
-        d = next(dk for dk in np.arange(1e3, 400e3, 1e3)
-                 if geo.elevation_deg(g, geo.to_ecef(*geo.destination(
-                     NEW_YORK.lat, NEW_YORK.lon, 0.0, dk, R), 10.5e3, R)) <= e)
-        la, lo = geo.destination(NEW_YORK.lat, NEW_YORK.lon, np.arange(0, 361, 3), d, R)
-        ax.plot(lo, la, ls=ls, color="r", lw=0.8, transform=pc,
-                label=f"{e}° elevation at 10.5 km ({d / 1e3:.0f} km)")
-    ax.plot(NEW_YORK.lon, NEW_YORK.lat, "r*", ms=10, transform=pc)
+               transform=pc, zorder=4, label="usable: ≥5° from a station, above 3 km")
+    ax.scatter([s.lon for s in stations], [s.lat for s in stations], marker="^", s=40,
+               color="#e6550d", edgecolor="k", lw=0.5, transform=pc, zorder=5,
+               label=f"ground stations ({len(stations)})")
+    g = geo.to_ecef(site.lat, site.lon, 0.0, R)
+    d = next(dk for dk in np.arange(1e3, 400e3, 1e3)
+             if geo.elevation_deg(g, geo.to_ecef(*geo.destination(
+                 site.lat, site.lon, 0.0, dk, R), 10.5e3, R)) <= 5)
+    la, lo = geo.destination(site.lat, site.lon, np.arange(0, 361, 3), d, R)
+    ax.plot(lo, la, ls="--", color="r", lw=0.8, transform=pc,
+            label=f"5° elevation at 10.5 km from the centre ({d / 1e3:.0f} km)")
+    ax.plot(site.lon, site.lat, "r*", ms=11, mec="k", mew=0.5, transform=pc, zorder=6)
     plt.colorbar(sc, ax=ax, shrink=0.7, label="altitude [km]")
     ax.legend(loc="lower right", fontsize=6)
-    ax.set_title("Airliners around NY4, 9 Jul 2023 14:00 UTC", fontsize=8)
-    _save(fig, "q3_newyork")
+    _save(fig, f"{name}_{day}")
 
 
-def snapshot_map():
-    sys.path.insert(0, str(Path(__file__).parent))
-    import figures
-
-    figures.FIG = FIG
-    figures.fig_map()
+def newyork(day):
+    # New York slightly up and left of the centre of the map
+    _station_map(day, NEW_YORK, [-76.9, -70.0, 38.6, 42.4], "q3_newyork")
 
 
-EXPERIMENTS = {"overview": overview, "tech": tech, "newyork": newyork, "map": snapshot_map}
+def frankfurt(day):
+    _station_map(day, FRANKFURT, [5.9, 12.4, 48.2, 51.8], "q3_frankfurt")
+
+
+EXPERIMENTS = {"overview": overview, "tech": tech, "map": snapshot_map, "newyork": newyork,
+               "frankfurt": frankfurt}
 PLOTS = {"overview": plot_overview, "tech": plot_tech}
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    plot_only = "--plot" in args
-    names = [a for a in args if a != "--plot"] or list(PLOTS if plot_only else EXPERIMENTS)
-    for name in names:
-        if not plot_only:
-            EXPERIMENTS[name]()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("names", nargs="*", default=list(EXPERIMENTS))
+    ap.add_argument("--day", choices=list(DAYS), action="append")
+    ap.add_argument("--plot", action="store_true", help="only redraw from stored results")
+    a = ap.parse_args()
+    days = a.day or list(DAYS)
+    for name in a.names:
+        if not a.plot:
+            for d in days:
+                EXPERIMENTS[name](d)
         if name in PLOTS:
-            PLOTS[name]()
+            PLOTS[name](list(DAYS))

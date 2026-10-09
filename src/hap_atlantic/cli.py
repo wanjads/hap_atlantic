@@ -44,10 +44,8 @@ def main(argv=None) -> None:
     sim.add_argument("--scenario", choices=SCENARIOS, default="leo")
     sim.add_argument("--k", type=int, default=2, help="terminals per aircraft")
     sim.add_argument("--every", type=int, default=10, help="evaluate every n-th time step")
-    sim.add_argument("--sites", type=int, default=None, help="ground stations per endpoint")
     sim.add_argument("--clouds", choices=["clear", "era5"], default="era5")
     sim.add_argument("--rf-rate", type=float, default=None, help="RF fallback rate [Gbit/s]")
-    sim.add_argument("--equipage", type=float, default=None)
     sim.add_argument("--all-aircraft", action="store_true", help="not only jet airliners")
     sim.add_argument("--seed", type=int, default=None)
     sim.add_argument("--start", required=True, help="UTC, e.g. '2023-07-09 00:00'")
@@ -101,12 +99,8 @@ def main(argv=None) -> None:
         p = scenario(args.scenario, args.k)
         p = replace(p, clouds=replace(p.clouds, model=args.clouds),
                     airliners_only=not args.all_aircraft)
-        if args.sites is not None:
-            p = replace(p, ground=replace(p.ground, n_sites=args.sites))
         if args.rf_rate is not None:
             p = replace(p, ground=replace(p.ground, rf_rate=args.rf_rate * 1e9))
-        if args.equipage is not None:
-            p = replace(p, equipage=args.equipage)
         if args.seed is not None:
             p = replace(p, seed=args.seed)
         t0 = pd.Timestamp(args.start, tz="UTC").timestamp()

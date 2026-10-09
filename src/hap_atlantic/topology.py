@@ -39,22 +39,24 @@ class GroundStation:
 
 
 def ground_stations(p: Params) -> list[GroundStation]:
-    """Ground stations: the endpoint itself plus (n_sites - 1) sites on a ring around it."""
+    """Stations of the latency service: the endpoint itself plus land points on rings around it.
+
+    Each ring (radius in site_rings) holds up to site_bearings stations at equal bearings;
+    points over water are skipped. Stations are connected to the endpoint by fibre.
+    """
+    lat_g, lon_g, lsm = land_sea_mask()
     out = []
     for endpoint, site, tag in ((SRC, p.source, "S"), (DST, p.sink, "D")):
-        n = p.ground.n_sites
-        for i in range(n):
-            if i == 0:
-                lat, lon, dist = site.lat, site.lon, 0.0
-            else:
-                brg = 360.0 * (i - 1) / (n - 1)
-                lat, lon = geo.destination(site.lat, site.lon, brg, p.ground.ring_radius,
-                                           p.geometry.earth_radius)
-                dist = p.ground.ring_radius
+        pts = [(site.lat, site.lon, 0.0)]
+        for r in p.ground.site_rings:
+            for b in np.arange(p.ground.site_bearings) * 360.0 / p.ground.site_bearings:
+                lat, lon = geo.destination(site.lat, site.lon, b, r, p.geometry.earth_radius)
+                if lsm[np.abs(lat_g - lat).argmin(), np.abs(lon_g - lon).argmin()] >= 0.5:
+                    pts.append((float(lat), float(lon), r))
+        for i, (lat, lon, dist) in enumerate(pts):
             delay = dist * p.ground.fiber_detour * N_FIBER / C0
             out.append(GroundStation(f"gs{tag}{i}", endpoint,
-                                     Site(f"{site.name} {i}", float(lat), float(lon), site.alt),
-                                     delay))
+                                     Site(f"{site.name} {i}", lat, lon, site.alt), delay))
     return out
 
 

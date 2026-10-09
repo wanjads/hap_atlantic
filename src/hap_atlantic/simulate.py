@@ -119,7 +119,7 @@ def run(states: pd.DataFrame, p: Params, configs, t0: float, t1: float, every: i
     times = np.sort(states["time"].unique())
     times = times[(times >= t0) & (times < t1)][::every]
     states = states[states["time"].isin(times)]  # only the evaluated snapshots
-    states = select_fleet(states, p.airliners_only, p.equipage, p.seed)
+    states = select_fleet(states, p.airliners_only)
     by_t = {t: g for t, g in states.groupby("time")}
     snaps = [(t, by_t.get(t, states.iloc[:0])) for t in times]
     t_range = (t0 - 3600.0, t1 + 3600.0)  # weather window (whole days are fetched)

@@ -108,18 +108,24 @@ def prune(G: nx.Graph) -> nx.Graph:
     return G.subgraph([SRC, DST]).copy()
 
 
+GAP = 0.01  # accepted relative gap to the upper bound
+
+
 def capacity(G: nx.Graph, r_max: float, time_limit: float = 60.0) -> dict:
     """Max SRC-DST flow under the terminal constraint (see module docstring).
 
-    Returns value, upper bound, heuristic value and the method that produced the value.
+    Stops as soon as a solution within GAP (1 %) of the upper bound is known: the heuristic
+    if it already meets the relaxation bound, otherwise the MILP with mip_rel_gap = GAP (or
+    the best solution found within time_limit). Returns value, upper bound, heuristic value
+    and the method that produced the value.
     """
     if not (G.has_node(SRC) and G.has_node(DST)) or not nx.has_path(G, SRC, DST):
         return {"value": 0.0, "bound": 0.0, "heuristic": 0.0, "method": "no path"}
     heur, _ = widest_path_heuristic(G)
     bound = max_flow_node_capacity(G, r_max)
-    if heur >= bound * (1 - 1e-6):
+    if heur >= bound * (1 - GAP):
         return {"value": heur, "bound": bound, "heuristic": heur, "method": "heuristic"}
-    r = milp_max_flow(prune(G), time_limit=time_limit)
+    r = milp_max_flow(prune(G), time_limit=time_limit, rel_gap=GAP)
     value = max(r["value"], heur)
     ub = min(bound, r["bound"]) if np.isfinite(r["bound"]) else bound
     return {"value": value, "bound": ub, "heuristic": heur, "method": "milp"}
@@ -222,7 +228,8 @@ def _widest_path(G, free, active, res, banned):
 # ----------------------------------------------------------------------------------------
 
 
-def milp_max_flow(G: nx.Graph, time_limit: float = 60.0, scale: float = 1e9) -> dict:
+def milp_max_flow(G: nx.Graph, time_limit: float = 60.0, scale: float = 1e9,
+                  rel_gap: float = 1e-3) -> dict:
     """Exact joint terminal assignment and routing (HiGHS via scipy.optimize.milp).
 
     Variables: x_e in {0,1} per non-fibre link, f_uv, f_vu >= 0 per link, F total flow.
@@ -298,7 +305,7 @@ def milp_max_flow(G: nx.Graph, time_limit: float = 60.0, scale: float = 1e9) -> 
     c[iF] = -1.0
     res = milp(c, constraints=LinearConstraint(A, lo, hi), integrality=integrality,
                bounds=Bounds(np.zeros(n_var), ub),
-               options={"time_limit": time_limit, "mip_rel_gap": 1e-3})
+               options={"time_limit": time_limit, "mip_rel_gap": rel_gap})
     value = -res.fun * scale if res.x is not None else 0.0
     bound = getattr(res, "mip_dual_bound", None)
     return {

@@ -119,9 +119,8 @@ def test_select_fleet():
 
     df = pd.DataFrame({"icao24": list("abcd"), "type": ["B77W", "GLF6", "A20N", "C17"],
                        "military": [False, False, False, True], "time": 0.0})
-    assert list(select_fleet(df, True, 1.0, 0)["icao24"]) == ["a", "c"]
-    assert len(select_fleet(df, False, 1.0, 0)) == 4
-    assert len(select_fleet(df, False, 0.0, 0)) == 0
+    assert list(select_fleet(df, True)["icao24"]) == ["a", "c"]
+    assert len(select_fleet(df, False)) == 4
 
 
 def test_latent_field_statistics():

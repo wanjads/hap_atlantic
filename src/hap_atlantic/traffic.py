@@ -37,19 +37,13 @@ AIRLINER_TYPES = frozenset("""
 """.split())
 
 
-def select_fleet(states: pd.DataFrame, airliners_only: bool, equipage: float,
-                 seed: int) -> pd.DataFrame:
-    """Aircraft that carry terminals: jet airliners, of which a random share `equipage`."""
+def select_fleet(states: pd.DataFrame, airliners_only: bool = True) -> pd.DataFrame:
+    """Aircraft that carry terminals: all jet airliners (no military aircraft)."""
     if airliners_only and "type" in states.columns:
         ok = states["type"].isin(AIRLINER_TYPES)
         if "military" in states.columns:
             ok &= ~states["military"].astype(bool)
         states = states[ok]
-    if equipage < 1.0:
-        ids = np.sort(states["icao24"].unique())
-        rng = np.random.default_rng([seed, 7])
-        keep = ids[rng.random(len(ids)) < equipage]
-        states = states[states["icao24"].isin(keep)]
     return states
 
 
