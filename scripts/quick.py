@@ -4,7 +4,7 @@ Two days: 9 July 2023 (summer, all-time Shanwick record) and 16 January 2024 (wi
 weekday). One snapshot per hour (24 per day), always with ERA5 clouds and RF fallback of
 the ground links, minimum elevation 5 deg, minimum air-to-air ray height 3 km;
 capacities within 1 % of the upper bound (MILP limit 30 s, snapshots still above 1 % are
-re-solved with 300 s; the bound is stored).
+re-solved with 60 s; the bound is stored).
 
 * capacity: ground stations everywhere on land, Europe -> North America
 * latency:  Frankfurt -> New York (NY4), stations at the endpoints and on rings of 75 and
@@ -78,7 +78,7 @@ def _config(r_max, k, p):
                   k)
 
 
-def _run(day, configs, milp_time=30.0, retry_time=300.0):
+def _run(day, configs, milp_time=30.0, retry_time=60.0):
     """All 24 snapshots; snapshots that are still > 1 % from the bound are re-solved."""
     tic = time.time()
     t0 = _t0(day)
