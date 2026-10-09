@@ -50,8 +50,13 @@ OUT, FIG = Path("results/quick"), Path("figures/quick")
 WORKERS = 4
 RATES = (1e9, 1e10, 1e11, 1e12)  # bit/s per link; 1 W up to 100 Gbit/s, 5 W at 1 Tbit/s
 
-plt.rcParams.update({"font.size": 8, "axes.grid": True, "grid.alpha": 0.3,
-                     "savefig.bbox": "tight", "savefig.dpi": 200})
+# Times, as in the paper (IEEEtran); STIX is the Times clone shipped with matplotlib
+plt.rcParams.update({"font.family": "serif",
+                     "font.serif": ["Times New Roman", "Nimbus Roman", "STIXGeneral"],
+                     "mathtext.fontset": "stix", "font.size": 8, "axes.grid": True,
+                     "grid.alpha": 0.3, "savefig.bbox": "tight", "savefig.dpi": 200})
+CABLE_ONE = 250e12  # Dunant (Dunant2021)
+CABLE_ALL = 1.2e15  # potential capacity of all trans-Atlantic cables (TeleGeography, TODO verify)
 
 
 def _t0(day):
@@ -160,18 +165,17 @@ def plot_tech(days):
     for d, r in res.items():
         for k, ls, mk in ((2, "-", "o"), (4, "--", "s")):
             cap = [r[f"cap_r{x:.0e}_k{k}"].mean() for x in RATES]
-            ub = [r[f"cap_r{x:.0e}_k{k}_bound"].mean() for x in RATES]
             ax.loglog(RATES, cap, ls=ls, marker=mk, ms=4, color=COLORS[d],
-                      label=f"{DAYS[d][2]}, K={k}")
-            ax.loglog(RATES, ub, "_", color="k", ms=8, mew=1.2)
-    ax.plot([], [], "k_", ms=8, mew=1.2, label="upper bound")
-    ax.axhline(250e12, color="k", lw=0.6, ls=":")
-    ax.text(1.1e9, 280e12, "one cable (250 Tbit/s)", fontsize=6)
+                      label=f"{DAYS[d][2]}, $K={k}$")
+    for v, lab in ((CABLE_ONE, "one cable (250 Tbit/s)"),
+                   (CABLE_ALL, "all trans-Atlantic cables (≈1.2 Pbit/s)")):
+        ax.axhline(v, color="k", lw=0.6, ls=":")
+        ax.text(2.9e9, v * 1.15, lab, fontsize=6)
     ax.axvspan(9e8, 2.6e9, color="0.85")
-    ax.text(1.0e9, 1.2e15, "demonstrated", fontsize=6)
+    ax.text(1.0e9, 4e13, "demon-\nstrated", fontsize=6)
     ax.set_xlim(7e8, 1.5e12)
     ax.set_ylim(2e9, 3e15)
-    ax.set_xlabel("rate per link R_max [bit/s]")
+    ax.set_xlabel(r"rate per link $R_\mathrm{max}$ [bit/s]")
     ax.set_ylabel("mean capacity Europe → N. America [bit/s]")
     ax.legend(fontsize=6, loc="lower right")
     _save(fig, "q4_tech")
