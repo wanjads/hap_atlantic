@@ -9,10 +9,30 @@ from . import flow
 from .config import Params
 from .topology import DST, SRC, CloudProcess, build_graph, ground_stations
 from .traffic import snapshots
+from .weather import WeatherProcess
 
 
 def _ground_links(G, endpoint) -> int:
     return sum(1 for gs in G.neighbors(endpoint) for v in G.neighbors(gs) if v != endpoint)
+
+
+def ocean_capacity(G, p: Params, lon_east: float = -15.0, lon_west: float = -55.0) -> float:
+    """Capacity of the oceanic section alone (heuristic, terminal limits respected).
+
+    Every aircraft east of lon_east may inject traffic and every aircraft west of lon_west
+    may extract it; such an access link costs one terminal and carries r_max, as if it came
+    from a continental neighbour. This isolates the oceanic bottleneck from the endpoints.
+    """
+    H = G.subgraph(v for v, k in G.nodes(data="kind") if k == "aircraft").copy()
+    H.add_node(SRC, kind="endpoint", terminals=np.inf)
+    H.add_node(DST, kind="endpoint", terminals=np.inf)
+    for v, lon in list(H.nodes(data="lon")):
+        if lon is None:
+            continue
+        end = SRC if lon > lon_east else DST if lon < lon_west else None
+        if end is not None:
+            H.add_edge(end, v, kind="air", cap=p.terminal.r_max, delay=0.0)
+    return flow.widest_path_heuristic(H)[0]
 
 
 def evaluate_snapshot(G, p: Params, run_milp: bool = False, milp_time: float = 30.0) -> dict:
@@ -21,6 +41,13 @@ def evaluate_snapshot(G, p: Params, run_milp: bool = False, milp_time: float = 3
     ub1, cut = flow.max_flow_unconstrained(G)
     ub2 = flow.max_flow_node_capacity(G, p.terminal.r_max)
     heur, paths = flow.widest_path_heuristic(G)
+    # backbone capacity: same graph, but ground stations with unlimited terminals
+    B = G.copy()
+    for v, kind in B.nodes(data="kind"):
+        if kind == "ground":
+            B.nodes[v]["terminals"] = np.inf
+    backbone, _ = flow.widest_path_heuristic(B)
+    ocean = ocean_capacity(G, p)
     delay, path = flow.min_latency_path(G)
     m = {
         "n_aircraft": n_air,
@@ -29,6 +56,8 @@ def evaluate_snapshot(G, p: Params, run_milp: bool = False, milp_time: float = 3
         "flow_unconstrained": ub1,
         "flow_relaxed": ub2,
         "flow_heuristic": heur,
+        "flow_backbone": backbone,
+        "flow_ocean": ocean,
         "n_paths": len(paths),
         "min_delay": delay,
         "min_delay_hops": max(len(path) - 1, 0),
@@ -45,14 +74,22 @@ def evaluate_snapshot(G, p: Params, run_milp: bool = False, milp_time: float = 3
 def run(grid_states: pd.DataFrame, p: Params, run_milp: bool = False,
         progress: bool = True, every: int = 1) -> pd.DataFrame:
     rng = np.random.default_rng(p.seed)
-    clouds = CloudProcess(len(ground_stations(p)), p.ground.p_cloud_free,
-                          p.ground.cloud_corr_time, p.dt, rng)
+    stations = ground_stations(p)
+    if p.ground.weather == "era5":
+        wx = WeatherProcess(stations, grid_states["time"].min(), grid_states["time"].max(),
+                            p.ground.f_cirrus, p.ground.rf_rain_max, rng)
+    else:
+        clouds = CloudProcess(len(stations), p.ground.p_cloud_free, p.ground.cloud_corr_time,
+                              p.dt, rng)
     rows = []
     for k, (t, snap) in enumerate(snapshots(grid_states)):
-        clear = clouds.step()
+        if p.ground.weather == "era5":
+            clear, rf_ok = wx.state(t)
+        else:
+            clear, rf_ok = clouds.step(), np.ones(len(stations), dtype=bool)
         if k % every:
             continue
-        G = build_graph(snap, p, clear)
+        G = build_graph(snap, p, clear, rf_ok)
         rows.append({"time": t, "n_clear_sites_src": int(clear[: p.ground.n_sites].sum()),
                      "n_clear_sites_dst": int(clear[p.ground.n_sites:].sum()),
                      **evaluate_snapshot(G, p, run_milp)})

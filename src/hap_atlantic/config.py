@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 # Physical constants
 C0 = 299_792_458.0  # speed of light in vacuum [m/s]
 H_PLANCK = 6.626_070_15e-34  # [J s]
-N_FIBER = 1.468  # group index of standard single-mode fibre (G.652) at 1550 nm
+N_FIBER = 1.4682  # group index of Corning SMF-28 Ultra at 1550 nm
 N_AIR = 1.0003  # refractive index of air (upper bound, sea level)
 
 
@@ -53,6 +53,9 @@ class GeometryParams:
     d_max_air: float = 700e3  # max. air-to-air link range (terminal acquisition limit) [m]
     h_node_min: float = 1_000.0  # aircraft below this altitude are ignored [m]
     elev_min_ground: float = 10.0  # min. elevation of ground-to-air links [deg]
+    corridor_half_width: float = 1000e3  # aircraft farther from the FRA-NY arc are ignored [m]
+    yao_cones: int = 8  # keep nearest + farthest neighbour per cone (0 = keep all links)
+    ray_samples: int = 16  # points per ray for extinction / turbulence integrals
 
 
 @dataclass(frozen=True)
@@ -62,8 +65,12 @@ class GroundParams:
     n_sites: int = 1  # number of ground stations per endpoint
     ring_radius: float = 50e3  # sites are placed on a ring of this radius [m]
     terminals_per_site: int = 4
-    p_cloud_free: float = 0.35  # stationary probability of a cloud-free line of sight [-]
-    cloud_corr_time: float = 3 * 3600.0  # mean duration of a cloud state [s]
+    weather: str = "era5"  # "era5" (hourly reanalysis at the sites) or "markov" (synthetic)
+    f_cirrus: float = 1.0  # fraction of high (cirrus) cloud cover that blocks the beam [-]
+    p_cloud_free: float = 0.35  # markov only: stationary P(cloud-free line of sight) [-]
+    cloud_corr_time: float = 3 * 3600.0  # markov only: mean duration of a cloud state [s]
+    rf_rate: float = 0.0  # RF fallback rate per ground link when cloudy, 0 = optical only [bit/s]
+    rf_rain_max: float = 5.0  # RF ground links fail above this rain rate [mm/h]
     fiber_detour: float = 1.3  # terrestrial fibre route length / great-circle distance [-]
 
 

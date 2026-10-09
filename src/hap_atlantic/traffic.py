@@ -62,8 +62,9 @@ def normalise(df: pd.DataFrame) -> pd.DataFrame:
         df = df.rename(columns={"onground": "on_ground"})
     if "on_ground" in df.columns:
         df = df[~df["on_ground"].astype(bool)]
-    if np.issubdtype(df["time"].dtype, np.datetime64):
-        df["time"] = df["time"].astype("int64") // 10**9
+    if pd.api.types.is_datetime64_any_dtype(df["time"]):  # unit-safe (pandas 3 uses us)
+        t = pd.to_datetime(df["time"], utc=True)
+        df["time"] = (t - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(seconds=1)
     df = df.dropna(subset=COLUMNS)
     out = df[COLUMNS].copy()
     out["icao24"] = out["icao24"].astype(str).str.strip().str.lower()
@@ -116,7 +117,7 @@ def interpolate_to_grid(
                     "lat": glat,
                     "lon": glon,
                     "alt": galt,
-                    "interpolated": gap[i] > 120.0,
+                    "interpolated": gap[i] > 600.0,
                 }
             )
         )

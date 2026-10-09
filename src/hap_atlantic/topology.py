@@ -74,11 +74,38 @@ class CloudProcess:
         return self.state.copy()
 
 
-def build_graph(snap: pd.DataFrame, p: Params, clear: np.ndarray | None = None) -> nx.Graph:
-    """Candidate graph for one snapshot (aircraft positions in `snap`)."""
+def yao_sparsify(pairs: np.ndarray, d: np.ndarray, lat, lon, cones: int) -> np.ndarray:
+    """Mask of pairs that are the nearest or farthest neighbour of either end in some cone.
+
+    The nearest-neighbour-per-cone (Yao) graph is a spanner, i.e. it preserves short paths;
+    the farthest neighbour per cone keeps the long hops that make low-latency paths.
+    """
+    i = np.concatenate([pairs[:, 0], pairs[:, 1]])
+    j = np.concatenate([pairs[:, 1], pairs[:, 0]])
+    dd = np.concatenate([d, d])
+    cone = (geo.initial_bearing(lat[i], lon[i], lat[j], lon[j]) * cones / 360.0).astype(int)
+    key = i.astype(np.int64) * cones + np.minimum(cone, cones - 1)
+    df = pd.DataFrame({"key": key, "d": dd, "pair": np.concatenate([np.arange(len(d))] * 2)})
+    g = df.groupby("key")["d"]
+    sel = np.union1d(df.loc[g.idxmin(), "pair"].to_numpy(), df.loc[g.idxmax(), "pair"].to_numpy())
+    keep = np.zeros(len(d), dtype=bool)
+    keep[sel] = True
+    return keep
+
+
+def build_graph(snap: pd.DataFrame, p: Params, clear: np.ndarray | None = None,
+                rf_ok: np.ndarray | None = None) -> nx.Graph:
+    """Candidate graph for one snapshot (aircraft positions in `snap`).
+
+    clear[i]: optical line of sight of ground station i is cloud-free.
+    rf_ok[i]: RF fallback of station i is usable (no heavy rain); only if p.ground.rf_rate > 0.
+    """
     g_par, term, atm = p.geometry, p.terminal, p.atmosphere
     r_eff = g_par.earth_radius * g_par.k_refraction
     snap = snap[snap["alt"] >= g_par.h_node_min]
+    corr = geo.corridor_distance(snap["lat"].to_numpy(), snap["lon"].to_numpy(), p.source.lat,
+                                 p.source.lon, p.sink.lat, p.sink.lon, g_par.earth_radius)
+    snap = snap[corr <= g_par.corridor_half_width]
     ids = snap["icao24"].to_numpy()
     pos = geo.to_ecef(snap["lat"].to_numpy(), snap["lon"].to_numpy(), snap["alt"].to_numpy(),
                       r_eff)
@@ -98,7 +125,11 @@ def build_graph(snap: pd.DataFrame, p: Params, clear: np.ndarray | None = None) 
             ok = geo.chord_min_height(a, b, r_eff) >= g_par.h_chord_min
             pairs, a, b = pairs[ok], a[ok], b[ok]
             d = np.linalg.norm(b - a, axis=-1)
-            rate = link_rate(d, geo.chord_heights(a, b, r_eff), term, atm)
+            if g_par.yao_cones:
+                keep = yao_sparsify(pairs, d, snap["lat"].to_numpy(), snap["lon"].to_numpy(),
+                                    g_par.yao_cones)
+                pairs, a, b, d = pairs[keep], a[keep], b[keep], d[keep]
+            rate = link_rate(d, geo.chord_heights(a, b, r_eff, g_par.ray_samples), term, atm)
             for (i, j), dist, r in zip(pairs, d, rate, strict=True):
                 if r > 0:
                     G.add_edge(ids[i], ids[j], kind="air", cap=float(r), dist=float(dist),
@@ -108,12 +139,15 @@ def build_graph(snap: pd.DataFrame, p: Params, clear: np.ndarray | None = None) 
     stations = ground_stations(p)
     if clear is None:
         clear = np.ones(len(stations), dtype=bool)
-    for gs, is_clear in zip(stations, clear, strict=True):
+    if rf_ok is None:
+        rf_ok = np.ones(len(stations), dtype=bool)
+    for gs, is_clear, is_rf in zip(stations, clear, rf_ok, strict=True):
         G.add_node(gs.name, kind="ground", terminals=p.ground.terminals_per_site,
                    lat=gs.site.lat, lon=gs.site.lon, alt=gs.site.alt, clear=bool(is_clear))
         G.add_edge(gs.endpoint, gs.name, kind="fiber", cap=np.inf, dist=0.0,
                    delay=gs.fiber_delay)
-        if not is_clear or len(ids) == 0:
+        use_rf = not is_clear and is_rf and p.ground.rf_rate > 0
+        if not (is_clear or use_rf) or len(ids) == 0:
             continue
         gpos = geo.to_ecef(gs.site.lat, gs.site.lon, gs.site.alt, r_eff)
         el = geo.elevation_deg(np.broadcast_to(gpos, pos.shape), pos)
@@ -122,10 +156,15 @@ def build_graph(snap: pd.DataFrame, p: Params, clear: np.ndarray | None = None) 
             continue
         a = np.broadcast_to(gpos, (sel.size, 3))
         d = np.linalg.norm(pos[sel] - a, axis=-1)
-        rate = link_rate(d, geo.chord_heights(a, pos[sel], r_eff), term, atm)
+        if use_rf:
+            rate = np.full(sel.size, p.ground.rf_rate)
+        else:
+            rate = link_rate(d, geo.chord_heights(a, pos[sel], r_eff, g_par.ray_samples), term,
+                             atm)
         for k, dist, r in zip(sel, d, rate, strict=True):
             if r > 0:
-                G.add_edge(gs.name, ids[k], kind="ground", cap=float(r), dist=float(dist),
+                G.add_edge(gs.name, ids[k], kind="ground", medium="rf" if use_rf else "optical",
+                           cap=float(r), dist=float(dist),
                            delay=float(dist * N_AIR / C0 + term.hop_delay))
     return G
 

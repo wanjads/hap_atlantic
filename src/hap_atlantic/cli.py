@@ -2,6 +2,7 @@
 
     hap-atlantic collect  --out data/raw/live --hours 24          # record OpenSky REST data
     hap-atlantic trino    --start "2025-07-11 00:00" --stop "2025-07-12 00:00"
+    hap-atlantic adsblol  data/raw/adsblol_20230709/*.tar --out data/raw/adsblol_20230709.parquet
     hap-atlantic prepare  data/raw/live --out data/processed/day.parquet
     hap-atlantic synth    --out data/processed/synthetic.parquet
     hap-atlantic simulate data/processed/day.parquet --scenario conservative
@@ -36,8 +37,13 @@ def main(argv=None) -> None:
     t.add_argument("--stop", required=True)
     t.add_argument("--out", default="data/raw/trino")
 
+    al = sub.add_parser("adsblol", help="extract positions from an adsb.lol daily archive")
+    al.add_argument("archive")
+    al.add_argument("--out", required=True)
+    al.add_argument("--min-dt", type=float, default=30.0)
+
     pr = sub.add_parser("prepare", help="clean raw states and resample onto a time grid")
-    pr.add_argument("raw")
+    pr.add_argument("raw", nargs="+", help="raw files (neighbouring days avoid edge effects)")
     pr.add_argument("--out", required=True)
     pr.add_argument("--dt", type=float, default=60.0)
 
@@ -52,6 +58,12 @@ def main(argv=None) -> None:
     sim.add_argument("--every", type=int, default=1, help="evaluate every n-th snapshot")
     sim.add_argument("--milp", action="store_true")
     sim.add_argument("--sites", type=int, default=None, help="ground stations per endpoint")
+    sim.add_argument("--clear-sky", action="store_true", help="no cloud blockage")
+    sim.add_argument("--rf-rate", type=float, default=None, help="RF fallback rate [Gbit/s]")
+    sim.add_argument("--f-cirrus", type=float, default=None)
+    sim.add_argument("--seed", type=int, default=None)
+    sim.add_argument("--start", default=None, help="UTC, e.g. '2023-07-09 00:00'")
+    sim.add_argument("--stop", default=None, help="UTC, exclusive")
     sim.add_argument("--out", default=None)
 
     sub.add_parser("bounds", help="print reference delays and a min-cut estimate")
@@ -77,6 +89,14 @@ def main(argv=None) -> None:
         df = fetch_history_trino(args.start, args.stop)
         name = f"trino_{args.start}_{args.stop}".replace(" ", "T").replace(":", "")
         df.to_parquet(out / f"{name}.parquet", index=False)
+    elif args.cmd == "adsblol":
+        from .adsblol import read_archive
+        from .opensky import NORTH_ATLANTIC_BBOX
+
+        df = read_archive(args.archive, NORTH_ATLANTIC_BBOX, args.min_dt)
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(args.out, index=False)
+        print(f"{df['icao24'].nunique()} aircraft, {len(df)} positions")
     elif args.cmd == "prepare":
         from .traffic import interpolate_to_grid, load_states
 
@@ -98,11 +118,25 @@ def main(argv=None) -> None:
         p = scenario(args.scenario)
         if args.sites is not None:
             p = replace(p, ground=replace(p.ground, n_sites=args.sites))
-        res = run(pd.read_parquet(args.states), p, run_milp=args.milp, every=args.every)
+        if args.clear_sky:
+            p = replace(p, ground=replace(p.ground, weather="markov", p_cloud_free=1.0))
+        if args.rf_rate is not None:
+            p = replace(p, ground=replace(p.ground, rf_rate=args.rf_rate * 1e9))
+        if args.f_cirrus is not None:
+            p = replace(p, ground=replace(p.ground, f_cirrus=args.f_cirrus))
+        if args.seed is not None:
+            p = replace(p, seed=args.seed)
+        states = pd.read_parquet(args.states)
+        if args.start:
+            states = states[states["time"] >= pd.Timestamp(args.start, tz="UTC").timestamp()]
+        if args.stop:
+            states = states[states["time"] < pd.Timestamp(args.stop, tz="UTC").timestamp()]
+        res = run(states, p, run_milp=args.milp, every=args.every)
         out = args.out or f"results/{Path(args.states).stem}_{args.scenario}.csv"
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         res.to_csv(out, index=False)
-        summary = (res[["flow_unconstrained", "flow_relaxed", "flow_heuristic"]] / 1e9).describe()
+        cols = ["flow_heuristic", "flow_backbone", "flow_ocean"]
+        summary = (res[cols] / 1e9).describe()
         print(summary.round(1).to_string())
         print(f"connected {res['connected'].mean():.1%}, median min delay "
               f"{res.loc[res['connected'], 'min_delay'].median() * 1e3:.2f} ms")

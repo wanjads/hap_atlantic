@@ -78,3 +78,26 @@ def slerp_latlon(lat1, lon1, lat2, lon2, f):
     p = w1[..., None] * a + w2[..., None] * b
     p /= np.linalg.norm(p, axis=-1, keepdims=True)
     return np.degrees(np.arcsin(p[..., 2])), np.degrees(np.arctan2(p[..., 1], p[..., 0]))
+
+
+def initial_bearing(lat1, lon1, lat2, lon2) -> np.ndarray:
+    """Initial great-circle bearing from point 1 to point 2 [deg, 0..360)."""
+    p1, p2 = np.radians(lat1), np.radians(lat2)
+    dl = np.radians(np.asarray(lon2) - np.asarray(lon1))
+    y = np.sin(dl) * np.cos(p2)
+    x = np.cos(p1) * np.sin(p2) - np.sin(p1) * np.cos(p2) * np.cos(dl)
+    return np.degrees(np.arctan2(y, x)) % 360.0
+
+
+def corridor_distance(lat, lon, lat_a, lon_a, lat_b, lon_b, radius: float) -> np.ndarray:
+    """Distance [m] of points to the great-circle segment a-b (endpoint distance beyond it)."""
+    a = to_ecef(lat_a, lon_a, 0.0, 1.0)
+    b = to_ecef(lat_b, lon_b, 0.0, 1.0)
+    p = to_ecef(lat, lon, 0.0, 1.0)
+    n = np.cross(a, b)
+    n /= np.linalg.norm(n)
+    cross = np.abs(np.arcsin(np.clip(p @ n, -1.0, 1.0))) * radius
+    inside = (np.cross(a, p) @ n >= 0) & (np.cross(p, b) @ n >= 0)
+    to_end = np.minimum(great_circle(lat, lon, lat_a, lon_a, radius),
+                        great_circle(lat, lon, lat_b, lon_b, radius))
+    return np.where(inside, cross, to_end)

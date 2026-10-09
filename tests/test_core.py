@@ -92,3 +92,20 @@ def test_normalise_rest_columns():
     out = normalise(df)
     assert out.iloc[0].to_dict() == {"time": 98.0, "icao24": "abc123", "lat": 50.0,
                                      "lon": -20.0, "alt": 11000.0}
+
+
+def test_adsblol_parse_trace():
+    from hap_atlantic.adsblol import parse_trace
+
+    data = {"icao": "3C6444", "timestamp": 1000.0, "trace": [
+        [0, 50.0, 8.0, "ground", None, None, 0, None, None, "adsb_icao", None],
+        [10, 50.1, 8.0, 10000, 300, 270, 0, 0, None, "adsb_icao", 10100],
+        [20, 50.2, 8.0, 11000, 300, 270, 0, 0, None, "adsb_icao", None],
+        [100, 50.3, 8.0, 12000, 300, 270, 0, 0, None, "adsb_icao", None],
+        [200, 10.0, 8.0, 35000, 450, 270, 0, 0, None, "adsb_icao", None],  # outside bbox
+        [300, 51.0, 8.0, 5000, 250, 270, 2, 0, None, "adsb_icao", None],
+    ]}
+    df = parse_trace(data, (35.0, 66.0, -80.0, 15.0), min_dt=30.0)
+    assert list(df["time"]) == [1010.0, 1100.0, 1300.0]
+    assert set(df["icao24"]) == {"3c6444"}
+    assert df["alt"].iloc[0] == pytest.approx(10100 * 0.3048)
