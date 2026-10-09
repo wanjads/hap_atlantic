@@ -1,13 +1,13 @@
 """Mini sanity-check experiments (seconds each) with figures in figures/quick/.
 
-9 July 2023, only 4 snapshots (04, 09, 14, 19 UTC), always with ERA5 clouds, 100 Gbit/s
-links, K = 2, minimum elevation 5 deg, minimum air-to-air ray height 3 km.
+9 July 2023, one snapshot per hour (24), always with ERA5 clouds and RF fallback of the
+ground links, 100 Gbit/s links, K = 2, minimum elevation 5 deg, minimum air-to-air ray
+height 3 km, MILP time limit 10 s (the upper bound is stored and plotted).
 
 * capacity: ground stations everywhere on land, Europe -> North America
 * latency:  Frankfurt -> New York (NY4), one station per endpoint, RF fallback
 
     python scripts/quick.py overview  # capacity and latency per snapshot
-    python scripts/quick.py clouds    # RF fallback on/off
     python scripts/quick.py tech      # rate per link x terminals per aircraft
     python scripts/quick.py newyork   # map: airliners around New York, elevation rings
     python scripts/quick.py map       # map of one snapshot
@@ -15,14 +15,13 @@ links, K = 2, minimum elevation 5 deg, minimum air-to-air ray height 3 km.
 Results are stored in results/quick/<name>.csv; `--plot` only redraws the figures from
 these files (no simulation):
 
-    python scripts/quick.py --plot overview clouds tech
+    python scripts/quick.py --plot overview tech
 """
 
 from __future__ import annotations
 
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -30,15 +29,15 @@ import numpy as np
 import pandas as pd
 
 from hap_atlantic import geometry as geo
-from hap_atlantic.config import NEW_YORK, TECHS, scenario
+from hap_atlantic.config import NEW_YORK, scenario
 from hap_atlantic.reference import benchmarks
-from hap_atlantic.simulate import run, tech_config
+from hap_atlantic.simulate import Config, run, tech_config
 from hap_atlantic.traffic import select_fleet
 
 STATES = "data/processed/20230708-10.parquet"
 DAY = pd.Timestamp("2023-07-09", tz="UTC").timestamp()
-T0, T1 = DAY + 4 * 3600.0, DAY + 86400.0
-EVERY = 300  # minutes -> 04, 09, 14, 19 UTC
+T0, T1 = DAY, DAY + 86400.0
+EVERY = 60  # minutes -> one snapshot per hour
 OUT, FIG = Path("results/quick"), Path("figures/quick")
 WORKERS = 4
 
@@ -56,7 +55,7 @@ def _states():
     return _CACHE["s"]
 
 
-def _run(p, label, configs=None, milp_time=2.0):
+def _run(p, label, configs=None, milp_time=10.0):
     tic = time.time()
     configs = configs or [tech_config("leo", 2, p)]
     r = run(_states(), p, configs, T0, T1, every=1, workers=WORKERS, milp_time=milp_time)
@@ -84,12 +83,14 @@ def _save(fig, name):
 def _latency(ax, rows):
     ref = benchmarks()
     for i, r in enumerate(rows):
-        ax.plot(r["hour"] + 0.3 * i, r["min_delay"] * 1e3, "o", label=r["variant"].iloc[0])
+        ax.plot(r["hour"] + 0.3 * i, r["min_delay"] * 1e3, "o", ms=3,
+                label=r["variant"].iloc[0])
     for lab, v in (("vacuum", "vacuum"), ("HF (scaled)", "hf_scaled"),
                    ("fibre + microwave", "fibre_microwave_published")):
         ax.axhline(ref[v] * 1e3, color="k", lw=0.6, ls=":")
-        ax.text(3.6, ref[v] * 1e3 + 0.15, lab, fontsize=6)
+        ax.text(0.2, ref[v] * 1e3 + 0.15, lab, fontsize=6)
     ax.set_xlabel("time [h UTC] (missing dot = no path)")
+    ax.set_xlim(-0.5, 24)
     ax.set_ylabel("Frankfurt–New York one-way latency [ms]")
     ax.set_ylim(20, 33)
 
@@ -101,71 +102,54 @@ def overview():
 def plot_overview():
     r = pd.read_csv(_out("overview"))
     fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
-    axes[0].bar(r["hour"], r["cap_leo_k2"] / 1e9, width=2)
+    axes[0].bar(r["hour"], r["cap_leo_k2"] / 1e9, width=0.8, label="achieved (MILP, 10 s)")
+    axes[0].plot(r["hour"], r["cap_leo_k2_bound"] / 1e9, "k_", ms=9, mew=1.5,
+                 label="upper bound")
     axes[0].set_ylabel("capacity Europe → N. America [Gbit/s]")
-    axes[1].bar(r["hour"] - 0.5, r["eu_access"], width=1, label="aircraft with access, Europe")
-    axes[1].bar(r["hour"] + 0.5, r["na_access"], width=1, label="… North America")
+    axes[0].legend(fontsize=6)
+    axes[1].bar(r["hour"] - 0.2, r["eu_access"], width=0.4, label="aircraft with access, Europe")
+    axes[1].bar(r["hour"] + 0.2, r["na_access"], width=0.4, label="… North America")
     axes[1].set_ylabel("aircraft with land access")
     axes[1].legend(fontsize=6)
     for ax in axes[:2]:
         ax.set_xlabel("time [h UTC]")
-        ax.set_xticks(r["hour"])
+        ax.set_xticks(range(0, 24, 3))
     _latency(axes[2], [r])
     fig.suptitle("9 Jul 2023, ERA5 clouds, 100 Gbit/s links, K=2", fontsize=8)
     _save(fig, "q1_overview")
 
 
-def clouds():
-    p = scenario("leo")
-    rows = [_run(p, "RF fallback (default)"),
-            _run(replace(p, ground=replace(p.ground, rf_rate=0.0)), "optical only")]
-    pd.concat(rows).to_csv(_out("clouds"), index=False)
+RATES = (1e9, 1e10, 1e11, 1e12)  # bit/s per link; 1 W up to 100 Gbit/s, 5 W at 1 Tbit/s
 
 
-def plot_clouds():
-    df = pd.read_csv(_out("clouds"))
-    df = df[~df["variant"].str.startswith("ice")]  # crystal-size test dropped
-    rows = [g for _, g in df.groupby("variant", sort=False)]
-    fig, axes = plt.subplots(1, 3, figsize=(11, 2.8))
-    x = np.arange(len(rows))
-    labels = [r["variant"].iloc[0] for r in rows]
-    axes[0].bar(x, [r["cap_leo_k2"].mean() / 1e9 for r in rows])
-    axes[0].set_ylabel("mean capacity Europe → N. America [Gbit/s]")
-    axes[1].bar(x, [r["connected"].mean() for r in rows])
-    axes[1].set_ylabel("share of snapshots: Frankfurt–NY path")
-    axes[1].set_ylim(0, 1.05)
-    for ax in axes[:2]:
-        ax.set_xticks(x, labels, rotation=20, ha="right", fontsize=7)
-    _latency(axes[2], rows)
-    axes[2].legend(fontsize=6)
-    _save(fig, "q2_clouds")
+def _rate_configs(p):
+    return [Config(f"r{r:.0e}_k{k}", r, (5.0 if r > 1e11 else 1.0) / p.terminal.p_tx, k)
+            for k in (2, 4) for r in RATES]
 
 
 def tech():
     p = scenario("leo")
-    names = ("leo", "dwdm")
-    configs = [tech_config(t, k, p) for t in names for k in (2, 4)]
-    _run(p, "ERA5", configs=configs).to_csv(_out("tech"), index=False)
+    _run(p, "ERA5", configs=_rate_configs(p)).to_csv(_out("tech"), index=False)
 
 
 def plot_tech():
     r = pd.read_csv(_out("tech"))
-    names = ("leo", "dwdm")
     fig, ax = plt.subplots(figsize=(4.5, 3))
     for k, col in ((2, "#1b9e77"), (4, "#d95f02")):
-        rates = [TECHS[t].r_max for t in names]
-        caps = [r[f"cap_{t}_k{k}"].mean() for t in names]
-        chains = caps[0] / TECHS["leo"].r_max
-        ax.loglog([TECHS["demo"].r_max, 1e11], [chains * TECHS["demo"].r_max, chains * 1e11],
-                  color=col, ls="--")
-        ax.loglog(rates, caps, "o-", color=col, label=f"K={k}")
+        cap = np.array([r[f"cap_r{x:.0e}_k{k}"].mean() for x in RATES])
+        ub = np.array([r[f"cap_r{x:.0e}_k{k}_bound"].mean() for x in RATES])
+        ax.loglog(RATES, cap, "o-", color=col, label=f"K={k}, achieved (MILP, 10 s)")
+        ax.loglog(RATES, ub, "_", color=col, ms=10, mew=1.5)
+    ax.plot([], [], "k_", ms=10, mew=1.5, label="upper bound")
     ax.axhline(250e12, color="k", lw=0.6, ls=":")
-    ax.text(3e9, 280e12, "one cable (250 Tbit/s)", fontsize=6)
-    ax.axvspan(1e9, 2.6e9, color="0.85")
-    ax.text(1.1e9, 3e9, "demon-\nstrated", fontsize=6)
+    ax.text(1.1e9, 280e12, "one cable (250 Tbit/s)", fontsize=6)
+    ax.axvspan(9e8, 2.6e9, color="0.85")
+    ax.text(1.0e9, 1.2e15, "demonstrated", fontsize=6)
+    ax.set_xlim(7e8, 1.5e12)
+    ax.set_ylim(5e9, 3e15)
     ax.set_xlabel("rate per link R_max [bit/s]")
     ax.set_ylabel("mean capacity Europe → N. America [bit/s]")
-    ax.legend(fontsize=6)
+    ax.legend(fontsize=6, loc="lower right")
     _save(fig, "q4_tech")
 
 
@@ -212,9 +196,8 @@ def snapshot_map():
     figures.fig_map()
 
 
-EXPERIMENTS = {"overview": overview, "clouds": clouds, "tech": tech, "newyork": newyork,
-               "map": snapshot_map}
-PLOTS = {"overview": plot_overview, "clouds": plot_clouds, "tech": plot_tech}
+EXPERIMENTS = {"overview": overview, "tech": tech, "newyork": newyork, "map": snapshot_map}
+PLOTS = {"overview": plot_overview, "tech": plot_tech}
 
 if __name__ == "__main__":
     args = sys.argv[1:]
