@@ -147,7 +147,7 @@ def plot_overview(days):
     ax.set_ylabel("Frankfurt–New York one-way latency [ms]")
     ax.set_ylim(20, 33)
     ax.legend(fontsize=6, loc="center right")
-    _save(fig, "q1_latency")
+    _save(fig, "q2_latency")
 
 
 # --- rate per link x terminals ------------------------------------------------------------
