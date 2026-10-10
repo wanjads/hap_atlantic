@@ -69,9 +69,9 @@ plt.rcParams.update({"font.family": "serif",
                      "axes.grid": True, "grid.alpha": 0.3, "savefig.bbox": "tight",
                      "savefig.pad_inches": 0.02, "savefig.dpi": 300})
 CABLE_ONE = 250e12  # Dunant (Dunant2021)
-# lower bound for all transatlantic cables: Dunant 250 + Grace Hopper 352 + Amitie 400 Tbit/s
-# (Dunant2021, TeleGeography2022, Amitie2023); 17 cables in total
-CABLE_ALL = (250 + 352 + 400) * 1e12
+# lower bound for all transatlantic cables: Dunant 250 + Grace Hopper 352 + Amitie >320 Tbit/s
+# (Dunant2021, Papapavlou2022); 17 cables in total (TeleGeography2022)
+CABLE_ALL = (250 + 352 + 320) * 1e12
 
 
 def power(r_max: float) -> float:
@@ -264,7 +264,7 @@ def plot_sweep(days):
     ax.set_xscale("log")
     ax.set_yscale("log")
     for v, lab in ((CABLE_ONE, "one cable (250 Tbit/s)"),
-                   (CABLE_ALL, "all transatlantic cables (>1 Pbit/s)")):
+                   (CABLE_ALL, "all transatlantic cables (>0.9 Pbit/s)")):
         ax.axhline(v, color="k", lw=0.6, ls=":")
         ax.text(3.2e9, v * 1.25, lab, fontsize=7)
     ax.axvspan(9e8, 2.7e9, color="0.88", lw=0)
