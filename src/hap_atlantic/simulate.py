@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from . import flow
-from .config import TECHS, Params
+from .config import Params
 from .topology import DST, SRC, build_graph, land_graph, with_tech
 from .traffic import select_fleet
 from .weather import CloudField
@@ -32,16 +32,14 @@ class Config:
     """Technology configuration evaluated on a candidate graph."""
 
     label: str
-    r_max: float
+    r_max: float  # transceiver rate per link [bit/s]
     p_scale: float  # transmit power relative to the one the graph was built with
-    k: int
+    k: int  # terminals per aircraft
 
 
-def tech_config(name: str, k: int, p: Params) -> Config:
-    t = TECHS[name]
-    return Config(f"{name}_k{k}", t.r_max, t.p_tx / p.terminal.p_tx, k)
-
-
+def config(r_max: float, k: int, p_tx: float, p: Params) -> Config:
+    """Configuration with rate r_max per link, k terminals and transmit power p_tx [W]."""
+    return Config(f"r{r_max:.1e}_k{k}", r_max, p_tx / p.terminal.p_tx, k)
 
 
 def _ground_links(G, endpoint) -> int:
@@ -101,12 +99,12 @@ def _mem_available() -> float:
 
 
 def safe_workers(workers: int, clouds: bool) -> int:
-    """Limit the number of processes so that they use at most 60 % of the free memory.
+    """Limit the number of processes so that they use at most 75 % of the free memory.
 
     Measured peak per worker: ~0.8 GB clear sky, ~1.8 GB with 3D ERA5 clouds.
     """
     per_worker = (2.0 if clouds else 1.0) * 1024**3
-    return max(1, min(workers, int(0.6 * _mem_available() / per_worker)))
+    return max(1, min(workers, int(0.75 * _mem_available() / per_worker)))
 
 
 def run(states: pd.DataFrame, p: Params, configs, t0: float, t1: float, every: int = 10,

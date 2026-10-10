@@ -6,7 +6,7 @@ the LaTeX table and the code cannot drift apart.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 # Physical constants
 C0 = 299_792_458.0  # speed of light in vacuum [m/s]
@@ -120,34 +120,3 @@ class Params:
     sink: Site = NEW_YORK
     dt: float = 60.0  # simulation time step [s]
     seed: int = 0
-
-
-@dataclass(frozen=True)
-class Tech:
-    """Terminal technology tier: line rate per link and the transmit power it needs."""
-
-    r_max: float  # [bit/s]
-    p_tx: float  # [W]
-    note: str
-
-
-# Airborne optical links have been demonstrated at 1-2.6 Gbit/s (Moll2015, FALCON2010,
-# GAASI2022, ESA2026); everything above is an extrapolation from space / ground systems.
-TECHS = {
-    "demo": Tech(2.5e9, 1.0, "demonstrated airborne rate"),
-    "leo": Tech(100e9, 1.0, "LEO laser crosslink class (Starlink2024)"),
-    "dwdm": Tech(1e12, 5.0, "DWDM terminal, 10 x 100 Gbit/s (extrapolation)"),
-    "visionary": Tech(10e12, 10.0, "ground-demo DWDM class (DLR2018), static link only"),
-}
-K_VALUES = (2, 4, 6)  # terminals per aircraft
-SCENARIOS = tuple(TECHS)
-
-
-def scenario(name: str, k: int = 2) -> Params:
-    """Params for a technology tier with k terminals per aircraft."""
-    if name not in TECHS:
-        raise ValueError(f"unknown scenario {name!r}")
-    base = Params()
-    t = TECHS[name]
-    return replace(base, terminals_per_aircraft=k,
-                   terminal=replace(base.terminal, r_max=t.r_max, p_tx=t.p_tx))

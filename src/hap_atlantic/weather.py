@@ -8,12 +8,15 @@ standard atmosphere) over the corridor are cached in data/weather as one .npz pe
 
 Model per time step t:
 
-* cloud occurrence: a point x (lat, lon, height) is inside a cloud if
-  Phi(Z(x, t)) < cc(x, t), where Z is a standard Gaussian field with covariance
+* cloud occurrence: a grid box (level, lat, lon) is cloudy if Phi(Z(x, t)) < cc(x, t) at
+  its centre x, where Z is a standard Gaussian field with covariance
   exp(-dh^2 / 2 L^2) exp(-dz^2 / 2 L_z^2) exp(-dt^2 / 2 T^2) (random Fourier features,
-  deterministic given the seed). The cloudy volume therefore matches ERA5, nearby points
-  and consecutive time steps are correlated, and the vertical decorrelation length L_z
-  gives the usual exponential-random overlap of cloud layers.
+  deterministic given the seed). Each 0.25 deg box is thus either cloudy or clear, the
+  expected cloudy volume matches ERA5, and nearby boxes and consecutive time steps are
+  correlated. The correlation lengths are modelling assumptions: L_z = 2 km is chosen in
+  line with the decorrelation length of cloud overlap derived from radar (Hogan &
+  Illingworth 2000), which is defined for an exponential overlap model and is not the
+  same quantity as the length of the latent Gaussian kernel used here.
 * in-cloud extinction (geometric optics, Francis et al. 1994, as in Roettenbacher et al.
   2024): beta = 3 WC / (2 rho r_e) for ice (rho_ice, r_e = 25 um) and liquid water
   (rho_w, r_e = 10 um), WC = water content [kg/m^3]. In-cloud water contents are the

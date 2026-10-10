@@ -4,14 +4,17 @@ Every aircraft carries K optical terminals, so at most K of its candidate links 
 active at the same time (degree constraint). Methods, from loosest to tightest:
 
 * `max_flow_unconstrained`  ignores the terminal limit (upper bound 1)
-* `max_flow_node_capacity`  relaxes it to a relay capacity of K/2 * r_max per node (bound 2)
+* `max_flow_node_capacity`  relaxes it to a relay capacity of floor(K/2) * r_max per
+                            aircraft (bound 2): with K terminals an aircraft can receive
+                            on at most floor(K/2) links and send on as many
 * `milp_max_flow`           exact terminal assignment + routing (MILP)
 * `widest_path_heuristic`   successive widest paths with terminal bookkeeping (scalable)
 
-`capacity` is what the evaluation reports: the heuristic value if it already meets bound 2
-(then it is optimal), otherwise the MILP on the graph pruned to nodes that lie on some
-SRC-DST path. The bounds refer to the candidate graph they are given; on a Yao-sparsified
-graph they bound the sparsified problem only.
+`capacity` is what the evaluation reports: the heuristic value if it is within GAP (1 %)
+of bound 2, otherwise the MILP on the graph pruned to nodes that lie on some SRC-DST path
+(solved to a relative gap of 1 % or until the time limit). The bounds refer to the
+candidate graph they are given; on a Yao-sparsified graph they bound the sparsified
+problem only.
 """
 
 from __future__ import annotations
@@ -115,8 +118,8 @@ def capacity(G: nx.Graph, r_max: float, time_limit: float = 60.0) -> dict:
     """Max SRC-DST flow under the terminal constraint (see module docstring).
 
     Stops as soon as a solution within GAP (1 %) of the upper bound is known: the heuristic
-    if it already meets the relaxation bound, otherwise the MILP with mip_rel_gap = GAP (or
-    the best solution found within time_limit). Returns value, upper bound, heuristic value
+    if it is within GAP of the relaxation bound, otherwise the MILP with mip_rel_gap = GAP
+    (or the best solution found within time_limit). Returns value, upper bound, heuristic value
     and the method that produced the value.
     """
     if not (G.has_node(SRC) and G.has_node(DST)) or not nx.has_path(G, SRC, DST):
@@ -128,6 +131,9 @@ def capacity(G: nx.Graph, r_max: float, time_limit: float = 60.0) -> dict:
     r = milp_max_flow(prune(G), time_limit=time_limit, rel_gap=GAP)
     value = max(r["value"], heur)
     ub = min(bound, r["bound"]) if np.isfinite(r["bound"]) else bound
+    # an upper bound below a feasible value can only come from solver tolerances
+    # (capacities far below the scaling unit); fall back to the relaxation bound
+    ub = bound if ub < value else ub
     return {"value": value, "bound": ub, "heuristic": heur, "method": "milp"}
 
 

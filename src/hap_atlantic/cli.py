@@ -3,8 +3,8 @@
     hap-atlantic adsblol  data/raw/adsblol_20230709/*.tar --out data/raw/adsblol_20230709.parquet
     hap-atlantic prepare  data/raw/adsblol_2023070*.parquet --out data/processed/day.parquet
     hap-atlantic synth    --out data/processed/synthetic.parquet
-    hap-atlantic simulate data/processed/day.parquet --scenario leo --k 2 \
-        --start 2023-07-09 --stop 2023-07-10 --clouds era5 --workers 16
+    hap-atlantic simulate data/processed/day.parquet --rate 100 --k 2 \
+        --start 2023-07-09 --stop 2023-07-10 --clouds era5 --workers 4
     hap-atlantic bounds                                            # latency benchmarks
 """
 
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import SCENARIOS, scenario
+from .config import Params
 
 
 def main(argv=None) -> None:
@@ -41,7 +41,8 @@ def main(argv=None) -> None:
 
     sim = sub.add_parser("simulate", help="run the capacity / latency simulation")
     sim.add_argument("states")
-    sim.add_argument("--scenario", choices=SCENARIOS, default="leo")
+    sim.add_argument("--rate", type=float, default=100.0, help="rate per link [Gbit/s]")
+    sim.add_argument("--p-tx", type=float, default=1.0, help="transmit power [W]")
     sim.add_argument("--k", type=int, default=2, help="terminals per aircraft")
     sim.add_argument("--every", type=int, default=10, help="evaluate every n-th time step")
     sim.add_argument("--clouds", choices=["clear", "era5"], default="era5")
@@ -94,9 +95,9 @@ def main(argv=None) -> None:
         df.to_parquet(args.out, index=False)
         print(f"{df['icao24'].nunique()} flights, {len(df)} positions")
     elif args.cmd == "simulate":
-        from .simulate import run, tech_config
+        from .simulate import config, run
 
-        p = scenario(args.scenario, args.k)
+        p = Params()
         p = replace(p, clouds=replace(p.clouds, model=args.clouds),
                     airliners_only=not args.all_aircraft)
         if args.rf_rate is not None:
@@ -105,7 +106,7 @@ def main(argv=None) -> None:
             p = replace(p, seed=args.seed)
         t0 = pd.Timestamp(args.start, tz="UTC").timestamp()
         t1 = pd.Timestamp(args.stop, tz="UTC").timestamp()
-        cfg = tech_config(args.scenario, args.k, p)
+        cfg = config(args.rate * 1e9, args.k, args.p_tx, p)
         res = run(pd.read_parquet(args.states), p, [cfg], t0, t1, every=args.every,
                   workers=args.workers)
         out = args.out or f"results/{Path(args.states).stem}_{cfg.label}_{args.clouds}.csv"

@@ -10,6 +10,13 @@ coverage gap are reconstructed along the great circle between the last position 
 and the first position after the gap, at constant speed and linearly varying altitude.
 The organised oceanic tracks follow the jet stream and can deviate from the great circle;
 this reconstruction error is not quantified here.
+
+Which gaps are bridged (see `interpolate_to_grid`): up to 10 min always; up to 1 h if the
+implied ground speed is 120-340 m/s; up to 8 h if it is 190-340 m/s. The ocean crossings
+of both days take 4-7 h at 200-300 m/s, whereas gaps of 7-10 h with 120-190 m/s are not
+continuous crossings (e.g. aircraft that leave the area to the south and return on a later
+flight); 190 m/s (370 kt) is below the cruise ground speed of a jet airliner even in a
+strong headwind.
 """
 
 from __future__ import annotations
@@ -90,16 +97,19 @@ def normalise(df: pd.DataFrame) -> pd.DataFrame:
 def interpolate_to_grid(
     states: pd.DataFrame,
     dt: float,
-    max_gap: float = 5 * 3600.0,
+    max_gap: float = 8 * 3600.0,
     min_speed: float = 120.0,
     max_speed: float = 340.0,
+    long_gap: float = 3600.0,
+    min_speed_long: float = 190.0,
     radius: float = 6_371_008.8,
 ) -> pd.DataFrame:
     """Resample every aircraft onto a common time grid with spacing dt.
 
-    Gaps longer than max_gap, or whose implied ground speed is outside
-    [min_speed, max_speed] m/s while longer than 10 min, are not bridged (aircraft landed,
-    two different flights with the same transponder, ...).
+    A gap between two position reports is bridged if it is at most 10 min long, or if it
+    is at most max_gap long and its implied ground speed lies in [min_speed, max_speed]
+    m/s ([min_speed_long, max_speed] for gaps longer than long_gap). Other gaps are not
+    bridged (aircraft landed, left the area, two flights with the same transponder, ...).
     """
     out = []
     for icao, g in states.sort_values("time").groupby("icao24", sort=False):
@@ -110,8 +120,9 @@ def interpolate_to_grid(
         gap = np.diff(t)
         dist = great_circle(lat[:-1], lon[:-1], lat[1:], lon[1:], radius)
         speed = dist / np.maximum(gap, 1e-9)
+        v_min = np.where(gap > long_gap, min_speed_long, min_speed)
         ok = (gap > 0) & (gap <= max_gap) & (
-            (gap <= 600.0) | ((speed >= min_speed) & (speed <= max_speed))
+            (gap <= 600.0) | ((speed >= v_min) & (speed <= max_speed))
         )
         grid = np.arange(np.ceil(t[0] / dt) * dt, t[-1] + 1e-9, dt)
         if grid.size == 0:
