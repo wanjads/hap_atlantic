@@ -3,9 +3,10 @@
 Two days: 9 July 2023 (summer, all-time Shanwick record) and 16 January 2024 (winter
 weekday). One snapshot per hour (24 per day), always with ERA5 clouds and RF fallback of
 the ground links, minimum elevation 5 deg, minimum air-to-air ray height 3 km. The only
-random element is the latent cloud field; every experiment is repeated for SEEDS.
-Capacities within 1 % of the upper bound (MILP limit 30 s, snapshots still above 1 % are
-re-solved with 300 s; the bound is stored).
+random element is the latent cloud field (seed 0; more seeds via --seed).
+Capacities are solved to within 1 % of the upper bound where possible: MILP limit 30 s,
+capacities still more than 1 % below the bound are re-solved with 300 s (the bound is
+stored with every value, so the remaining gap is known).
 
 * capacity: ground stations everywhere on land, Europe -> North America
 * latency:  Frankfurt -> New York (NY4), stations at the endpoints and on rings of 75 and
@@ -13,6 +14,7 @@ re-solved with 300 s; the bound is stored).
 
     python scripts/quick.py sweep      # all rates x K = 2, 4 per day and seed (main run)
     python scripts/quick.py rings      # latency without the ring stations
+    python scripts/quick.py --seed 1 --seed 2 --seed 3 --seed 4 latency  # latency, more seeds
     python scripts/quick.py map        # maps of one snapshot (12 UTC, seed 0)
     python scripts/quick.py newyork    # airliners and ground stations around New York
     python scripts/quick.py frankfurt  # the same around Frankfurt
@@ -20,7 +22,8 @@ re-solved with 300 s; the bound is stored).
     python scripts/quick.py --day winter --seed 0 sweep   # one day / seed only
     python scripts/quick.py --plot sweep                  # redraw from results/quick/*.csv
 
-Existing result files are not recomputed (delete them or use --force).
+Existing result files are not recomputed (delete them or use --force); every day is run in
+blocks of 4 hours that are stored in results/quick/parts/, so an interrupted run resumes.
 """
 
 from __future__ import annotations
@@ -49,10 +52,10 @@ DAYS = {
     "summer": ("data/processed/20230708-10.parquet", "2023-07-09", "9 Jul 2023"),
     "winter": ("data/processed/20240115-17.parquet", "2024-01-16", "16 Jan 2024"),
 }
-SEEDS = (0, 1, 2, 3, 4)
+SEEDS = (0,)  # seeds of the latent cloud field (one: a day takes about an hour)
 COLORS = {"summer": "#d95f02", "winter": "#1f78b4"}
 OUT, FIG = Path("results/quick"), Path("figures/quick")
-WORKERS = 2
+WORKERS = 4  # further limited by the free memory (simulate.safe_workers)
 RATES = (1e9, 2.5e9, 1e10, 1e11, 1e12)  # bit/s per link
 KS = (2, 4)
 REF = (1e11, 2)  # reference configuration: 100 Gbit/s, K = 2
@@ -66,9 +69,9 @@ plt.rcParams.update({"font.family": "serif",
                      "axes.grid": True, "grid.alpha": 0.3, "savefig.bbox": "tight",
                      "savefig.pad_inches": 0.02, "savefig.dpi": 300})
 CABLE_ONE = 250e12  # Dunant (Dunant2021)
-# lower bound for all trans-Atlantic cables: Dunant 250 + Grace Hopper 352 + Amitie 400 +
-# Yellow 25 Tbit/s (Dunant2021, TeleGeography2022, Amitie2023); 17 cables in total
-CABLE_ALL = (250 + 352 + 400 + 25) * 1e12
+# lower bound for all transatlantic cables: Dunant 250 + Grace Hopper 352 + Amitie 400 Tbit/s
+# (Dunant2021, TeleGeography2022, Amitie2023); 17 cables in total
+CABLE_ALL = (250 + 352 + 400) * 1e12
 
 
 def power(r_max: float) -> float:
@@ -91,23 +94,32 @@ def _states(day):
     return st[(st["time"] - t0) % 3600 == 0]
 
 
-def _run(day, p, configs, milp_time=30.0, retry_time=300.0):
-    """All 24 snapshots; snapshots that are still > 1 % from the bound are re-solved."""
+def _run(day, p, configs, milp_time=30.0, retry_time=300.0, hours=range(24)):
+    """Hourly snapshots; capacities that are still > 1 % from the bound are re-solved."""
     tic = time.time()
     t0 = _t0(day)
+    t_a, t_b = t0 + 3600 * min(hours), t0 + 3600 * (max(hours) + 1)
     states = _states(day)
+    states = states[(states["time"] >= t_a) & (states["time"] < t_b)]
+    # the time window of `run` stays the whole day: it also selects the cached weather file
     r = run(states, p, configs, t0, t0 + 86400, every=1, workers=WORKERS, milp_time=milp_time)
     cols = [f"cap_{c.label}" for c in configs]
-    if cols:
-        hard = r[np.any([r[c] < 0.99 * r[f"{c}_bound"] for c in cols], axis=0)]["time"]
+    # re-solve only the (snapshot, configuration) pairs that are still > 1 % from the bound
+    r = r.set_index("time")
+    for c in configs:
+        col = f"cap_{c.label}"
+        hard = r.index[r[col] < 0.99 * r[f"{col}_bound"]]
         if len(hard):
-            print(f"  {day} seed {p.seed}: re-solving {len(hard)} snapshots with "
-                  f"{retry_time:.0f} s", flush=True)
-            r2 = run(states[states["time"].isin(hard)], p, configs, t0, t0 + 86400, every=1,
-                     workers=WORKERS, milp_time=retry_time)
-            r = pd.concat([r[~r["time"].isin(hard)], r2]).sort_values("time", ignore_index=True)
+            print(f"  {day} seed {p.seed}: re-solving {len(hard)} snapshots for {c.label} "
+                  f"with {retry_time:.0f} s", flush=True)
+            r2 = run(states[states["time"].isin(hard)], p, [c], t0, t0 + 86400, every=1,
+                     workers=WORKERS, milp_time=retry_time).set_index("time")
+            for k in (col, f"{col}_heur", f"{col}_bound"):
+                r.loc[r2.index, k] = r2[k]
+    r = r.reset_index()
     r["hour"] = (r["time"] - t0) / 3600.0
-    msg = f"  {day} seed {p.seed}: {time.time() - tic:.0f} s"
+    msg = (f"  {day} seed {p.seed} {min(hours):02d}-{max(hours) + 1:02d} h: "
+           f"{time.time() - tic:.0f} s")
     if cols:
         c = f"cap_{label(*REF)}"
         msg += f", capacity {r[c].mean() / 1e9:.0f} Gbit/s"
@@ -124,7 +136,7 @@ def _read(name, days):
     """{day: DataFrame of all seeds} for the result files that exist."""
     res = {}
     for d in days:
-        files = [_out(name, d, s) for s in SEEDS if _out(name, d, s).exists()]
+        files = sorted(OUT.glob(f"{name}_{d}_s*.csv"))
         if files:
             res[d] = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
     return res
@@ -147,25 +159,51 @@ def _time_axis(ax):
 # --- main run: all rates x K, per day and seed --------------------------------------------
 
 
-def sweep(day, seed, force=False):
-    f = _out("sweep", day, seed)
+BLOCK = 4  # hours per checkpoint: an interrupted run loses at most one block
+
+
+def _blocks(name, day, seed, p, configs, force):
+    """Run the day in blocks of BLOCK hours (checkpointed), then merge into one file.
+
+    After every block the elapsed time and a naive estimate of the remaining time of this
+    day (mean block time x remaining blocks) are printed.
+    """
+    f = _out(name, day, seed)
     if f.exists() and not force:
         print(f"  {f} exists")
         return
+    parts, spent, done = [], 0.0, 0
+    starts = list(range(0, 24, BLOCK))
+    for n, h0 in enumerate(starts):
+        part = OUT / "parts" / f"{name}_{day}_s{seed}_h{h0:02d}.csv"
+        if force or not part.exists():
+            part.parent.mkdir(parents=True, exist_ok=True)
+            tic = time.time()
+            _run(day, p, configs, hours=range(h0, h0 + BLOCK)).to_csv(part, index=False)
+            spent, done = spent + time.time() - tic, done + 1
+            left = len(starts) - n - 1
+            print(f"  {name} {day} seed {seed}: {spent / 60:.1f} min so far, about "
+                  f"{spent / done * left / 60:.0f} min left for this day", flush=True)
+        parts.append(pd.read_csv(part))
+    pd.concat(parts, ignore_index=True).to_csv(f, index=False)
+
+
+def sweep(day, seed, force=False):
     p = replace(Params(), seed=seed)
     configs = [config(r, k, power(r), p) for k in KS for r in RATES]
-    _run(day, p, configs).to_csv(f, index=False)
+    _blocks("sweep", day, seed, p, configs, force)
+
+
+def latency(day, seed, force=False):
+    """Latency only (no capacity), for the cloud seeds beyond seed 0 (cheap: ~2 min/day)."""
+    _blocks("latency", day, seed, replace(Params(), seed=seed), [], force)
 
 
 def rings(day, seed, force=False):
     """Latency only, without the ring stations (stations at the endpoints only)."""
-    f = _out("rings", day, seed)
-    if f.exists() and not force:
-        print(f"  {f} exists")
-        return
     p = replace(Params(), seed=seed)
     p = replace(p, ground=replace(p.ground, site_rings=()))
-    _run(day, p, []).to_csv(f, index=False)
+    _blocks("rings", day, seed, p, [], force)
 
 
 def plot_sweep(days):
@@ -186,24 +224,27 @@ def plot_sweep(days):
         ax.plot(x, g[f"{col}_bound"].mean() / 1e9, "k_", ms=3, mew=0.8)
     ax.plot([], [], "k_", ms=5, mew=0.8, label="upper bound")
     ax.set_ylabel("capacity [Gbit/s]")
+    ax.set_ylim(0, 1.2 * ax.get_ylim()[1])
     _time_axis(ax)
-    ax.legend(loc="upper right")
+    ax.legend(loc="upper right", ncol=3, columnspacing=1.0, handlelength=1.5)
     _save(fig, "q1_capacity")
 
-    # latency per hour: mean over the seeds with a path, whiskers min-max
-    fig, ax = plt.subplots(figsize=(COLW, 2.3))
+    # latency per hour: markers seed 0, whiskers min-max over all cloud seeds with a path
+    fig, ax = plt.subplots(figsize=(COLW, 2.1))
     ref = benchmarks()
+    lat = _read("latency", days)
     for i, (d, r) in enumerate(res.items()):
-        rc = r[r["connected"]]
-        g = rc.groupby("hour")["min_delay"]
-        m, lo, hi = g.mean() * 1e3, g.min() * 1e3, g.max() * 1e3
-        ax.errorbar(m.index + 0.25 * (i - 0.5), m, yerr=[m - lo, hi - m], fmt="o", ms=2.5,
-                    color=COLORS[d], elinewidth=0.6, label=DAYS[d][2])
-    for lab, v in (("vacuum", "vacuum"), ("LEO bound", "leo_lower_bound"),
-                   ("shortwave (scaled)", "hf_scaled"),
-                   ("fiber + microwave", "fibre_microwave_published")):
+        allseeds = pd.concat([r, lat[d]]) if d in lat else r
+        g = allseeds[allseeds["connected"]].groupby("hour")["min_delay"]
+        r0 = r[(r["seed"] == 0) & r["connected"]].set_index("hour")["min_delay"] * 1e3
+        lo, hi = (g.min() * 1e3).reindex(r0.index), (g.max() * 1e3).reindex(r0.index)
+        ax.errorbar(r0.index + 0.25 * (i - 0.5), r0, yerr=[r0 - lo, hi - r0], fmt="o", ms=2.5,
+                    color=COLORS[d], elinewidth=0.6, capsize=0, label=DAYS[d][2])
+    for lab, v, dy in (("vacuum", "vacuum", -0.55), ("LEO bound", "leo_lower_bound", 0.12),
+                       ("shortwave (scaled)", "hf_scaled", 0.12),
+                       ("fiber + microwave", "fibre_microwave_published", 0.12)):
         ax.axhline(ref[v] * 1e3, color="k", lw=0.6, ls=":")
-        ax.text(0.0, ref[v] * 1e3 + 0.12, lab, fontsize=7)
+        ax.text(0.0, ref[v] * 1e3 + dy, lab, fontsize=7)
     _time_axis(ax)
     ax.set_ylabel("one-way latency [ms]")
     ax.set_ylim(20, 33)
@@ -211,7 +252,7 @@ def plot_sweep(days):
     _save(fig, "q2_latency")
 
     # mean capacity versus rate per link
-    fig, ax = plt.subplots(figsize=(COLW, 2.4))
+    fig, ax = plt.subplots(figsize=(COLW, 2.15))
     for d, r in res.items():
         for k, ls, mk in ((2, "-", "o"), (4, "--", "s")):
             per_seed = np.array([[r.loc[r["seed"] == s, f"cap_{label(x, k)}"].mean()
@@ -241,6 +282,8 @@ def plot_sweep(days):
 
 def summary(days=tuple(DAYS)):
     res, rg = _read("sweep", days), _read("rings", days)
+    lat = {d: pd.concat([r, *([_read("latency", [d])[d]] if _read("latency", [d]) else [])],
+                        ignore_index=True) for d, r in res.items()}
     ref = benchmarks()
     lines = ["benchmarks [ms]: " + ", ".join(f"{k}={v * 1e3:.2f}" for k, v in ref.items()
                                               if k != "great_circle_km")]
@@ -281,6 +324,13 @@ def summary(days=tuple(DAYS)):
                      f"{rc.min_delay_hops.median():.0f}")
         nc = r[~r["connected"]]
         lines.append(f"not connected but capacity > 0: {int((nc[col] > 0).sum())} of {len(nc)}")
+        if d in lat:
+            g = lat[d]
+            con = g.groupby("seed")["connected"].sum()
+            gc = g[g["connected"]]
+            lines.append(f"latency over {g.seed.nunique()} seeds: connected hours {dict(con)}, "
+                         f"median {gc.min_delay.median() * 1e3:.2f} ms, range "
+                         f"{gc.min_delay.min() * 1e3:.2f}-{gc.min_delay.max() * 1e3:.2f} ms")
         if d in rg:
             g = rg[d]
             lines.append(f"without rings: connected hours per seed "
@@ -310,7 +360,7 @@ def snapshot_map(day, hour=12):
     delay, path = flow.min_latency_path(G)
     print(f"  {day} {hour:02d}:00 UTC: min. delay {delay * 1e3:.2f} ms, {len(path) - 1} hops")
     pc = ccrs.PlateCarree()
-    fig = plt.figure(figsize=(COLW, 1.6))
+    fig = plt.figure(figsize=(COLW, 1.35))
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.LambertConformal(
         central_longitude=-33, central_latitude=50, standard_parallels=(40, 60)))
     ax.set_extent([-80, 14, 34, 66], crs=pc)
@@ -353,7 +403,7 @@ def _station_map(day, site, extent, name, hour=14):
     # aircraft below h_chord_min cannot have links to other aircraft, i.e. cannot relay
     vis &= snap.alt.to_numpy() >= p.geometry.h_chord_min
     pc = ccrs.PlateCarree()
-    fig = plt.figure(figsize=(3.0, 2.3))
+    fig = plt.figure(figsize=(3.0, 2.6))
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.LambertConformal(site.lon, site.lat))
     ax.set_extent(extent, crs=pc)
     ax.add_feature(cfeature.LAND.with_scale("50m"), facecolor="#f2f2f2", edgecolor="none")
@@ -376,7 +426,7 @@ def _station_map(day, site, extent, name, hour=14):
     ax.plot(site.lon, site.lat, "r*", ms=7, mec="k", mew=0.4, transform=pc, zorder=6)
     cb = plt.colorbar(sc, ax=ax, shrink=0.8, pad=0.02)
     cb.set_label("altitude [km]")
-    ax.legend(loc="lower right", fontsize=6, framealpha=0.9)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.02), fontsize=6.5, frameon=False)
     _save(fig, f"{name}_{day}")
 
 
@@ -389,7 +439,7 @@ def frankfurt(day):
     _station_map(day, FRANKFURT, [5.9, 12.4, 48.2, 51.8], "q3_frankfurt")
 
 
-PER_SEED = {"sweep": sweep, "rings": rings}
+PER_SEED = {"sweep": sweep, "rings": rings, "latency": latency}
 PER_DAY = {"map": snapshot_map, "newyork": newyork, "frankfurt": frankfurt}
 PLOTS = {"sweep": plot_sweep}
 

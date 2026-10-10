@@ -50,7 +50,7 @@ hap-atlantic weather --start "2023-07-08 23:00" --end "2023-07-10 01:00"
 hap-atlantic weather --start "2024-01-15 23:00" --end "2024-01-17 01:00"
 
 # 3. experiments and figures (results/quick/*.csv, figures/quick/*.pdf|png)
-./run_all.sh                                # everything: 2 days x 5 seeds, maps, summary
+./run_all.sh                                # everything: 2 days, maps, summary (~1.5 h)
 python scripts/quick.py sweep               # main run (all rates x K, every day and seed)
 python scripts/quick.py --day winter --seed 0 sweep   # one day / seed
 python scripts/quick.py rings               # latency without the ring stations
@@ -60,11 +60,13 @@ python scripts/quick.py summary             # numbers of the paper -> results/qu
 hap-atlantic bounds                         # latency benchmarks
 ```
 
-Existing result files are skipped, so an interrupted run can simply be restarted.
+Existing result files are skipped and every day is computed in blocks of 4 hours
+(`results/quick/parts/`), so an interrupted run can simply be restarted; after every block
+the log shows the time spent and an estimate of the remaining time.
 
 Days: 9 July 2023 (all-time record of Shanwick Oceanic, summer) and 16 January 2024
 (winter weekday), one snapshot per hour. The only random element is the latent cloud
-field; every experiment is repeated for five seeds (0–4). Only aircraft within 1000 km of
+field (seed 0; further seeds with `--seed`, about one hour per day and seed on 2 cores). Only aircraft within 1000 km of
 the Frankfurt–New York great circle are considered (also for the capacity). Long runs
 can be started with a memory cap, e.g.
 `systemd-run --user --scope -p MemoryMax=8G ./run_all.sh`; the number of worker processes
