@@ -102,3 +102,11 @@ is also limited by the free memory (`simulate.safe_workers`).
   at 25°.
 
 All parameters are in `src/hap_atlantic/config.py`.
+
+## Use of AI
+
+This code, the figures it generates and the text of the accompanying paper were written
+with the AI system Claude (Anthropic, Claude Opus 5.5), following the authors' idea,
+specifications and feedback. The AI system also searched and checked the literature and
+reviewed code and text. Commits made with its help carry a `Co-Authored-By: Claude` line.
+The authors directed the work, checked the results and take full responsibility for them.
