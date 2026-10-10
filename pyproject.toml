@@ -1,11 +1,14 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hap_atlantic"
 version = "0.1.0"
 description = "Capacity and latency of an optical airliner backbone between Frankfurt and New York"
+license = "MIT"
+authors = [{ name = "Wanja de Sombre" }]
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
@@ -15,6 +18,9 @@ dependencies = [
     "networkx",
     "matplotlib",
     "requests",
+    "xarray",
+    "zarr",
+    "gcsfs",
 ]
 
 [project.optional-dependencies]

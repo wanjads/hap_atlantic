@@ -110,3 +110,10 @@ with the AI system Claude (Anthropic, Claude Opus 5.5), following the authors' i
 specifications and feedback. The AI system also searched and checked the literature and
 reviewed code and text. Commits made with its help carry a `Co-Authored-By: Claude` line.
 The authors directed the work, checked the results and take full responsibility for them.
+
+## License
+
+The code is released under the MIT License, see `LICENSE`. The input data are not part of
+this repository; the scripts download them from their sources, whose terms apply: the
+adsb.lol archives are licensed under the Open Database License (ODbL), and ERA5 is provided
+under the Copernicus licence, both with attribution required.
