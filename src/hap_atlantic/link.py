@@ -11,7 +11,8 @@ Model (per link, evaluated vectorised over many links):
 * M_turb: fade margin for a target outage probability, from the scintillation index of a
   spherical wave (Andrews & Phillips, strong-fluctuation expression) with the
   Hufnagel-Valley 5/7 C_n^2 profile integrated along the ray. Aperture averaging is
-  neglected (conservative).
+  neglected, which overestimates the margin, while the log-normal model underestimates
+  deep fades in strong turbulence.
 """
 
 from __future__ import annotations
