@@ -229,17 +229,21 @@ def plot_sweep(days):
     ax.legend(loc="upper right", ncol=3, columnspacing=1.0, handlelength=1.5)
     _save(fig, "q1_capacity")
 
-    # latency per hour: markers seed 0, whiskers min-max over all cloud seeds with a path
+    # latency per hour: markers = median over all cloud seeds (no path counts as infinite
+    # latency, so an hour has a marker if most seeds have a path), whiskers = min-max over
+    # the seeds with a path
     fig, ax = plt.subplots(figsize=(COLW, 2.1))
     ref = benchmarks()
     lat = _read("latency", days)
     for i, (d, r) in enumerate(res.items()):
         allseeds = pd.concat([r, lat[d]]) if d in lat else r
+        ms_ = np.where(allseeds["connected"], allseeds["min_delay"] * 1e3, np.inf)
+        med = pd.Series(ms_, index=allseeds["hour"].to_numpy()).groupby(level=0).median()
+        med = med[np.isfinite(med)]
         g = allseeds[allseeds["connected"]].groupby("hour")["min_delay"]
-        r0 = r[(r["seed"] == 0) & r["connected"]].set_index("hour")["min_delay"] * 1e3
-        lo, hi = (g.min() * 1e3).reindex(r0.index), (g.max() * 1e3).reindex(r0.index)
-        ax.errorbar(r0.index + 0.25 * (i - 0.5), r0, yerr=[r0 - lo, hi - r0], fmt="o", ms=2.5,
-                    color=COLORS[d], elinewidth=0.6, capsize=0, label=DAYS[d][2])
+        lo, hi = (g.min() * 1e3).reindex(med.index), (g.max() * 1e3).reindex(med.index)
+        ax.errorbar(med.index + 0.25 * (i - 0.5), med, yerr=[med - lo, hi - med], fmt="o",
+                    ms=2.5, color=COLORS[d], elinewidth=0.6, capsize=0, label=DAYS[d][2])
     for lab, v, dy in (("vacuum", "vacuum", -0.55), ("LEO bound", "leo_lower_bound", 0.12),
                        ("shortwave (scaled)", "hf_scaled", 0.12),
                        ("fiber + microwave", "fibre_microwave_published", 0.12)):
